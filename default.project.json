@@ -1,0 +1,71 @@
+{
+  "name": "Game",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$ignoreUnknownInstances": true,
+
+      "Design": {
+        "$className": "Folder",
+        "$path": "src/shared/Design",
+        "$ignoreUnknownInstances": true
+      },
+      "Modules": {
+        "$className": "Folder",
+        "$path": "src/shared/Modules",
+        "$ignoreUnknownInstances": true
+      },
+      "Remotes": {
+        "$className": "Folder",
+        "$path": "src/shared/Remotes",
+        "$ignoreUnknownInstances": true
+      },
+      "Shared": {
+        "$className": "Folder",
+        "$path": "src/shared/Shared",
+        "$ignoreUnknownInstances": true
+      }
+    },
+
+    "ServerScriptService": {
+      "$ignoreUnknownInstances": true,
+
+      "Core": {
+        "$className": "Folder",
+        "$path": "src/server/Core",
+        "$ignoreUnknownInstances": true
+      },
+      "Debug": {
+        "$className": "Folder",
+        "$path": "src/server/Debug",
+        "$ignoreUnknownInstances": true
+      },
+      "Systems": {
+        "$className": "Folder",
+        "$path": "src/server/Systems",
+        "$ignoreUnknownInstances": true
+      }
+    },
+
+    "StarterPlayer": {
+      "StarterPlayerScripts": {
+        "Client": {
+          "$path": "src/client",
+          "$ignoreUnknownInstances": true
+        }
+      },
+      "StarterCharacterScripts": {
+        "$path": "src/character",
+        "$ignoreUnknownInstances": true
+      }
+    },
+
+    "StarterGui": { "$ignoreUnknownInstances": true },
+    "ServerStorage": { "$ignoreUnknownInstances": true },
+    "Workspace": { "$ignoreUnknownInstances": true },
+    "Teams": { "$ignoreUnknownInstances": true },
+    "SoundService": { "$ignoreUnknownInstances": true },
+    "TextChatService": { "$ignoreUnknownInstances": true }
+  }
+}

@@ -268,7 +268,12 @@ local function promoteToRegister(state)
 		return
 	end
 
-	if (root.Position - spotPos).Magnitude > 1.8 then
+	if planarDistance(root.Position, spotPos) > 1.8 then
+		local now = os.clock()
+		if now - (state._lastPromoteDebug or 0) > 1 then
+			state._lastPromoteDebug = now
+			print(string.format("[PromoteSkip] frontId=%s distToSpot1=%.2f", tostring(frontId), planarDistance(root.Position, spotPos)))
+		end
 		return
 	end
 
@@ -281,7 +286,7 @@ local function promoteToRegister(state)
 		print(string.format("[PromoteToRegister] clientId=%s", frontId))
 		frontClient.moveToken += 1
 		local token = frontClient.moveToken
-		local reachedOrder = moveToAndConfirm(frontClient.model, pos, 2.0, 8)
+		local reachedOrder = moveToAndConfirm(frontClient.model, pos, 3.0, 10)
 		if token ~= frontClient.moveToken then
 			return
 		end

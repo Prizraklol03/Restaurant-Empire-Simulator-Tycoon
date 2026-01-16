@@ -87,7 +87,26 @@ function BusinessService.CreateBusinessForPlayer(player)
 	kiosk.Name = "Kiosk_" .. tostring(player.UserId)
 	kiosk:SetAttribute("OwnerUserId", player.UserId)
 	kiosk.Parent = businessesRoot
-	kiosk:PivotTo(plot:GetPivot())
+
+	local plotCf, plotSize = plot:GetBoundingBox()
+	local kioskCf, kioskSize = kiosk:GetBoundingBox()
+	local plotTopY = plotCf.Position.Y + (plotSize.Y / 2)
+	local kioskHalfY = kioskSize.Y / 2
+	local targetY = plotTopY + kioskHalfY + 0.05
+
+	local pivot = plot:GetPivot()
+	local _, yaw, _ = pivot:ToOrientation()
+	local targetPos = Vector3.new(plotCf.Position.X, targetY, plotCf.Position.Z)
+	local targetCf = CFrame.new(targetPos) * CFrame.Angles(0, yaw, 0)
+
+	for _, descendant in ipairs(kiosk:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = true
+		end
+	end
+
+	print(("[BusinessSpawn] plot=%s plotTopY=%.2f kioskSizeY=%.2f targetY=%.2f"):format(plot.Name, plotTopY, kioskSize.Y, targetY))
+	kiosk:PivotTo(targetCf)
 
 	local clientsFolder = Instance.new("Folder")
 	clientsFolder.Name = "Clients"

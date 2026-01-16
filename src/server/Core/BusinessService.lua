@@ -4,6 +4,8 @@
 local ServerStorage = game:GetService("ServerStorage")
 local Workspace = game:GetService("Workspace")
 
+local PlotService = require(game.ServerScriptService.Core.PlotService)
+
 local BusinessService = {}
 
 local businessesFolder
@@ -27,11 +29,9 @@ end
 local function gatherQueueSpots(queueFolder)
 	local spots = {}
 	for _, child in ipairs(queueFolder:GetChildren()) do
-		if child:IsA("BasePart") then
-			local index = tonumber(string.match(child.Name, "^Spot_(%d+)$"))
-			if index then
-				table.insert(spots, { index = index, part = child })
-			end
+		local index = tonumber(string.match(child.Name, "^Spot_(%d+)$"))
+		if index then
+			table.insert(spots, { index = index, part = child })
 		end
 	end
 
@@ -47,46 +47,58 @@ local function gatherQueueSpots(queueFolder)
 	return result
 end
 
-local function findPrompt(part)
-	if not part then
-		return nil
+local function findPrompts(root)
+	local prompts = {}
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("ProximityPrompt") then
+			table.insert(prompts, descendant)
+		end
 	end
-	return part:FindFirstChildOfClass("ProximityPrompt")
+	return prompts
 end
 
-function BusinessService.CreateBusiness(player)
+local function pickPromptByName(prompts, name)
+	for _, prompt in ipairs(prompts) do
+		if prompt.Name == name then
+			return prompt
+		end
+	end
+
+	return prompts[1]
+end
+
+function BusinessService.CreateBusinessForPlayer(player)
+	local plot = PlotService.AcquirePlot(player)
+	if not plot then
+		warn("[BusinessService] No available plot for player", player.UserId)
+		return nil
+	end
+
 	local template = ServerStorage:FindFirstChild("KioskTemplate")
 	if not template then
 		warn("[BusinessService] KioskTemplate missing in ServerStorage")
+		PlotService.ReleasePlot(player)
 		return nil
 	end
 
 	local businessesRoot = getBusinessesFolder()
-	local playerFolder = businessesRoot:FindFirstChild(tostring(player.UserId))
-	if not playerFolder then
-		playerFolder = Instance.new("Folder")
-		playerFolder.Name = tostring(player.UserId)
-		playerFolder.Parent = businessesRoot
-	end
-
-	for _, child in ipairs(playerFolder:GetChildren()) do
-		child:Destroy()
-	end
 
 	local kiosk = template:Clone()
-	kiosk.Name = "Kiosk"
+	kiosk.Name = "Kiosk_" .. tostring(player.UserId)
 	kiosk:SetAttribute("OwnerUserId", player.UserId)
-	kiosk.Parent = playerFolder
+	kiosk.Parent = businessesRoot
+	kiosk:PivotTo(plot:GetPivot())
 
 	local clientsFolder = Instance.new("Folder")
 	clientsFolder.Name = "Clients"
-	clientsFolder.Parent = playerFolder
+	clientsFolder.Parent = kiosk
 
 	local serviceFolder = kiosk:FindFirstChild("Service")
 	local flowFolder = kiosk:FindFirstChild("ClientFlow")
 	if not serviceFolder or not flowFolder then
 		warn("[BusinessService] KioskTemplate missing Service or ClientFlow")
 		kiosk:Destroy()
+		PlotService.ReleasePlot(player)
 		return nil
 	end
 
@@ -102,16 +114,18 @@ function BusinessService.CreateBusiness(player)
 	if not (cashRegister and drinkMachine and grill and queueFolder and spawnPoint and endPoint and orderPoint) then
 		warn("[BusinessService] KioskTemplate missing required parts")
 		kiosk:Destroy()
+		PlotService.ReleasePlot(player)
 		return nil
 	end
 
-	local cashPrompt = findPrompt(cashRegister)
-	local grillPrompt = findPrompt(grill)
-	local drinkPrompt = findPrompt(drinkMachine)
+	local cashPrompts = findPrompts(cashRegister)
+	local grillPrompts = findPrompts(grill)
+	local drinkPrompts = findPrompts(drinkMachine)
 
-	if not (cashPrompt and grillPrompt and drinkPrompt) then
+	if #cashPrompts == 0 or #grillPrompts == 0 or #drinkPrompts == 0 then
 		warn("[BusinessService] Missing ProximityPrompt on service stations")
 		kiosk:Destroy()
+		PlotService.ReleasePlot(player)
 		return nil
 	end
 
@@ -119,20 +133,22 @@ function BusinessService.CreateBusiness(player)
 	if #queueSpots == 0 then
 		warn("[BusinessService] Queue has no Spot_N parts")
 		kiosk:Destroy()
+		PlotService.ReleasePlot(player)
 		return nil
 	end
 
 	local business = {
 		player = player,
 		kiosk = kiosk,
+		plot = plot,
 		clientsFolder = clientsFolder,
 		spawnPoint = spawnPoint,
 		endPoint = endPoint,
 		orderPoint = orderPoint,
 		queueSpots = queueSpots,
-		cashRegisterPrompt = cashPrompt,
-		grillPrompt = grillPrompt,
-		drinkPrompt = drinkPrompt,
+		cashRegisterPrompts = cashPrompts,
+		grillPrompts = grillPrompts,
+		drinkPrompts = drinkPrompts,
 	}
 
 	activeBusinesses[player] = business
@@ -143,17 +159,19 @@ function BusinessService.GetBusiness(player)
 	return activeBusinesses[player]
 end
 
-function BusinessService.RemoveBusiness(player)
+function BusinessService.DestroyBusinessForPlayer(player)
 	local business = activeBusinesses[player]
 	if not business then
+		PlotService.ReleasePlot(player)
 		return
 	end
 
 	if business.kiosk and business.kiosk.Parent then
-		business.kiosk.Parent:Destroy()
+		business.kiosk:Destroy()
 	end
 
 	activeBusinesses[player] = nil
+	PlotService.ReleasePlot(player)
 end
 
 return BusinessService

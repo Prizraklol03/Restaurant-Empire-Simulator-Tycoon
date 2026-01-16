@@ -14,77 +14,39 @@ local Net = require(ReplicatedStorage.Shared.Net)
 
 local Modules = script.Parent:WaitForChild("Modules")
 local ClientAI = require(Modules:WaitForChild("ClientAI"))
-local QueueService = require(Modules:WaitForChild("QueueService"))
 
 local UpdateBusinessStats = Net.GetRemoteEvent("UpdateBusinessStats")
 local UpdateCashRegisterUI = Net.GetRemoteEvent("UpdateCashRegisterUI")
 
 local StartClientSystem = {}
 
-local ActiveBusinesses = {}
+local Active = {}
 
-local function getClientTemplate()
-	return ServerStorage:FindFirstChild("ClientTemplate")
-end
+local SPAWN_MIN = 3
+local SPAWN_MAX = 6
 
-local function setModelPosition(model, target)
-	if not model then
-		return
-	end
-
-	local primary = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart")
-	if primary then
-		model:PivotTo(target)
-	end
-end
-
-local function getClientId(model)
-	return model and model:GetAttribute("ClientId")
-end
-
-local function createClient(state)
-	local template = getClientTemplate()
-	if not template then
-		warn("[ClientSystem] ClientTemplate missing")
+local function getSpotPosition(spot)
+	if not spot then
 		return nil
 	end
-
-	local clientModel = template:Clone()
-	local clientId = tostring(game:GetService("HttpService"):GenerateGUID(false))
-	clientModel:SetAttribute("ClientId", clientId)
-	clientModel:SetAttribute("OwnerUserId", state.player.UserId)
-
-	clientModel.Parent = state.clientsFolder
-	setModelPosition(clientModel, state.spawnPoint.CFrame)
-
-	state.clients[clientId] = {
-		model = clientModel,
-		spawnedAt = os.clock(),
-	}
-
-	return clientModel
-end
-
-local function updateQueueAssignments(state, assignments)
-	for model, spot in pairs(assignments) do
-		if model and model.Parent then
-			ClientAI.MoveTo(model, spot.Position, 6)
-		end
+	if spot:IsA("Attachment") then
+		return spot.WorldPosition
 	end
+	return spot.Position
 end
 
-local function enqueueClient(state, clientModel)
-	local spotIndex = state.queue:Join(clientModel)
-	if not spotIndex then
-		clientModel:Destroy()
-		return false
+local function logSpotNames(spots)
+	local names = {}
+	for _, spot in ipairs(spots) do
+		local name = spot.Name
+		table.insert(names, name)
 	end
-	return true
+	return table.concat(names, ",")
 end
 
-local function sendBusinessStats(state)
+local function updateBusinessStats(state)
 	local now = os.clock()
-	if now - state.lastStatsSent < 1 then
+	if now - (state.lastStatsSent or 0) < 1 then
 		return
 	end
 
@@ -93,7 +55,7 @@ local function sendBusinessStats(state)
 		v = 1,
 		money = PlayerService.GetMoney(state.player),
 		servedCount = state.servedCount,
-		queueSize = state.queue:GetSize(),
+		queueSize = #state.queueOrder,
 		location = "Kiosk",
 	})
 end
@@ -102,10 +64,97 @@ local function sendCashRegister(state, payload)
 	UpdateCashRegisterUI:FireClient(state.player, payload)
 end
 
-local function createOrderForClient(state, clientModel)
-	local clientId = getClientId(clientModel)
+local function assignQueueSpots(state)
+	for index, clientId in ipairs(state.queueOrder) do
+		local client = state.clients[clientId]
+		local spot = state.queueSpots[index]
+		if client and spot then
+			if client.spotIndex ~= index then
+				client.spotIndex = index
+				client.atSpot = false
+				local pos = getSpotPosition(spot)
+				if pos and client.model then
+					print(string.format("[Queue] player=%s clientId=%s spotIndex=%d", state.player.UserId, clientId, index))
+					ClientAI.MoveTo(client.model, pos, 6)
+					client.atSpot = true
+				end
+			end
+		end
+	end
+end
+
+local function spawnClient(state)
+	local template = ServerStorage:FindFirstChild("ClientTemplate")
+	if not template then
+		warn("[ClientSystem] ClientTemplate missing")
+		return
+	end
+
+	state.clientCounter += 1
+	local clientId = state.clientCounter
+	local model = template:Clone()
+	model:SetAttribute("ClientId", clientId)
+	model:SetAttribute("OwnerUserId", state.player.UserId)
+	model.Parent = state.clientsFolder
+
+	if model.PrimaryPart or model:FindFirstChild("HumanoidRootPart") then
+		model:PivotTo(state.spawnPoint.CFrame)
+	end
+
+	state.clients[clientId] = {
+		model = model,
+		state = "Queue",
+		spotIndex = nil,
+		atSpot = false,
+	}
+
+	table.insert(state.queueOrder, clientId)
+	print(string.format("[Spawn] player=%s clientId=%s queueSize=%d/%d", state.player.UserId, clientId, #state.queueOrder, #state.queueSpots))
+	assignQueueSpots(state)
+	updateBusinessStats(state)
+end
+
+local function moveToRegisterIfReady(state)
+	if state.currentAtRegister then
+		return
+	end
+
+	local frontId = state.queueOrder[1]
+	if not frontId then
+		return
+	end
+
+	local frontClient = state.clients[frontId]
+	if not frontClient or not frontClient.atSpot then
+		return
+	end
+
+	table.remove(state.queueOrder, 1)
+	state.currentAtRegister = frontId
+	frontClient.state = "Register"
+	frontClient.atSpot = false
+
+	assignQueueSpots(state)
+
+	local pos = getSpotPosition(state.orderPoint)
+	if pos and frontClient.model then
+		print(string.format("[Register] player=%s clientId=%s moving to register", state.player.UserId, frontId))
+		ClientAI.MoveTo(frontClient.model, pos, 8)
+		frontClient.atSpot = true
+		print(string.format("[Register] player=%s clientId=%s reached register", state.player.UserId, frontId))
+	end
+end
+
+local function createOrder(state)
+	local clientId = state.currentAtRegister
 	if not clientId then
-		return nil
+		warn("[TakeOrder] no client at register")
+		return
+	end
+
+	if state.currentOrder then
+		warn("[TakeOrder] order already exists")
+		return
 	end
 
 	local items = OrderGenerator.Generate({
@@ -120,11 +169,22 @@ local function createOrderForClient(state, clientModel)
 	})
 
 	if not order then
-		return nil
+		warn("[Order] creation failed")
+		return
 	end
 
-	state.currentOrder = order
-	state.currentAtRegister = clientModel
+	state.currentOrder = {
+		orderId = order.id,
+		clientId = clientId,
+		state = "CREATED",
+		ready = false,
+		stationType = order.stationType,
+		cookTime = order.cookTime,
+		deadlineAt = order.deadlineAt,
+		price = order.price,
+	}
+
+	print(string.format("[Order] created player=%s clientId=%s orderId=%s", state.player.UserId, clientId, order.id))
 
 	sendCashRegister(state, {
 		v = 1,
@@ -136,52 +196,6 @@ local function createOrderForClient(state, clientModel)
 		cookTime = order.cookTime,
 		deadlineAt = order.deadlineAt,
 	})
-
-	return order
-end
-
-local function processFront(state)
-	if state.currentAtRegister or state.currentOrder then
-		return
-	end
-
-	local frontModel = state.queue:GetFront()
-	if not frontModel then
-		return
-	end
-
-	state.queue:Leave(frontModel)
-	local reached = ClientAI.MoveTo(frontModel, state.orderPoint.Position, 8)
-	if not reached then
-		frontModel:Destroy()
-		return
-	end
-
-	createOrderForClient(state, frontModel)
-end
-
-local function failOrder(state, reason)
-	local order = state.currentOrder
-	if not order then
-		return
-	end
-
-	OrderService.FailOrder(order.id, reason)
-	sendCashRegister(state, {
-		v = 1,
-		state = "FAILED",
-		reason = reason,
-		orderId = order.id,
-	})
-
-	if state.currentAtRegister then
-		ClientAI.MoveTo(state.currentAtRegister, state.endPoint.Position, 8)
-		state.currentAtRegister:Destroy()
-	end
-
-	state.currentOrder = nil
-	state.currentAtRegister = nil
-	sendBusinessStats(state)
 end
 
 local function completeOrder(state)
@@ -190,36 +204,85 @@ local function completeOrder(state)
 		return
 	end
 
-	OrderService.CompleteOrder(order.id)
+	OrderService.CompleteOrder(order.orderId)
 	PlayerService.AddMoney(state.player, order.price or 0)
 	state.servedCount += 1
 
-	sendBusinessStats(state)
+	print(string.format("[Order] completed player=%s orderId=%s", state.player.UserId, order.orderId))
 
-	if state.currentAtRegister then
-		ClientAI.MoveTo(state.currentAtRegister, state.endPoint.Position, 8)
-		state.currentAtRegister:Destroy()
+	updateBusinessStats(state)
+
+	local clientId = state.currentAtRegister
+	local client = clientId and state.clients[clientId]
+	if client and client.model then
+		local pos = getSpotPosition(state.endPoint)
+		if pos then
+			client.state = "Exit"
+			ClientAI.MoveTo(client.model, pos, 8)
+			client.model:Destroy()
+			state.clients[clientId] = nil
+		end
 	end
 
 	state.currentOrder = nil
 	state.currentAtRegister = nil
 end
 
+local function failOrder(state, reason)
+	local order = state.currentOrder
+	if not order then
+		return
+	end
+
+	OrderService.FailOrder(order.orderId, reason)
+	print(string.format("[Order] failed player=%s orderId=%s reason=%s", state.player.UserId, order.orderId, reason))
+
+	sendCashRegister(state, {
+		v = 1,
+		state = "FAILED",
+		reason = reason,
+		orderId = order.orderId,
+	})
+
+	local clientId = state.currentAtRegister
+	local client = clientId and state.clients[clientId]
+	if client and client.model then
+		local pos = getSpotPosition(state.endPoint)
+		if pos then
+			client.state = "Exit"
+			ClientAI.MoveTo(client.model, pos, 8)
+			client.model:Destroy()
+			state.clients[clientId] = nil
+		end
+	end
+
+	state.currentOrder = nil
+	state.currentAtRegister = nil
+	updateBusinessStats(state)
+end
+
 local function startCooking(state, stationType)
 	local order = state.currentOrder
-	if not order or order.ready or order.cooking then
+	if not order then
+		return
+	end
+
+	if order.ready or order.state == "COOKING" then
 		return
 	end
 
 	if order.stationType ~= stationType then
+		warn("[Cook] wrong station", stationType)
 		return
 	end
 
-	order.cooking = true
+	order.state = "COOKING"
+	print(string.format("[Cook] start player=%s orderId=%s station=%s", state.player.UserId, order.orderId, stationType))
+
 	sendCashRegister(state, {
 		v = 1,
 		state = "COOKING",
-		orderId = order.id,
+		orderId = order.orderId,
 		stationType = stationType,
 		cookTime = order.cookTime,
 	})
@@ -230,139 +293,202 @@ local function startCooking(state, stationType)
 		end
 
 		order.ready = true
-		order.cooking = false
+		order.state = "READY"
+		print(string.format("[Cook] ready player=%s orderId=%s", state.player.UserId, order.orderId))
 
 		sendCashRegister(state, {
 			v = 1,
 			state = "READY",
-			orderId = order.id,
+			orderId = order.orderId,
 		})
 	end)
 end
 
 local function bindPrompts(state)
-	state.cashRegisterPrompt.Triggered:Connect(function(player)
-		if player ~= state.player then
-			return
-		end
+	local ownerId = state.player.UserId
 
-		local order = state.currentOrder
-		if not order or not order.ready then
-			return
-		end
+	local takeOrderPrompt = state.takeOrderPrompt
+	if takeOrderPrompt then
+		takeOrderPrompt.Triggered:Connect(function(triggerPlayer)
+			print("[TakeOrder] trigger", triggerPlayer.Name, "owner", ownerId, "currentAtRegister", state.currentAtRegister, "hasOrder", state.currentOrder ~= nil)
+			if triggerPlayer.UserId ~= ownerId then
+				warn("[TakeOrder] not owner")
+				return
+			end
+			if not state.currentAtRegister then
+				warn("[TakeOrder] no client at register")
+				return
+			end
+			if state.currentOrder then
+				if state.currentOrder.ready then
+					completeOrder(state)
+					moveToRegisterIfReady(state)
+					return
+				end
+				warn("[TakeOrder] order already exists")
+				return
+			end
+			createOrder(state)
+		end)
+	else
+		warn("[ClientSystem] TakeOrder prompt missing")
+	end
 
-		completeOrder(state)
-		processFront(state)
-	end)
+	local servePrompt = state.servePrompt
+	if servePrompt then
+		servePrompt.Triggered:Connect(function(triggerPlayer)
+			if triggerPlayer.UserId ~= ownerId then
+				warn("[ServeOrder] not owner")
+				return
+			end
+			if not state.currentOrder then
+				warn("[ServeOrder] no order")
+				return
+			end
+			if not state.currentOrder.ready then
+				warn("[ServeOrder] order not ready")
+				return
+			end
+			completeOrder(state)
+			moveToRegisterIfReady(state)
+		end)
+	end
 
-	state.grillPrompt.Triggered:Connect(function(player)
-		if player ~= state.player then
-			return
-		end
-		startCooking(state, "GRILL")
-	end)
+	for _, prompt in ipairs(state.grillPrompts) do
+		prompt.Triggered:Connect(function(triggerPlayer)
+			if triggerPlayer.UserId ~= ownerId then
+				warn("[Cook] not owner")
+				return
+			end
+			startCooking(state, "GRILL")
+		end)
+	end
 
-	state.drinkPrompt.Triggered:Connect(function(player)
-		if player ~= state.player then
-			return
-		end
-		startCooking(state, "DRINK")
-	end)
+	for _, prompt in ipairs(state.drinkPrompts) do
+		prompt.Triggered:Connect(function(triggerPlayer)
+			if triggerPlayer.UserId ~= ownerId then
+				warn("[Cook] not owner")
+				return
+			end
+			startCooking(state, "DRINK")
+		end)
+	end
 end
 
-local function startSpawnLoop(state)
-	state.spawnTask = task.spawn(function()
-		while state.active do
-			task.wait(math.random(6, 10))
-			if state.queue:GetSize() >= state.queue:GetCapacity() then
-				continue
-			end
+local function update(state)
+	if os.clock() >= state.nextSpawnAt and #state.queueOrder < #state.queueSpots then
+		spawnClient(state)
+		state.nextSpawnAt = os.clock() + math.random(SPAWN_MIN, SPAWN_MAX)
+	end
 
-			local clientModel = createClient(state)
-			if clientModel then
-				enqueueClient(state, clientModel)
-				processFront(state)
-			end
-		end
-	end)
+	moveToRegisterIfReady(state)
+
+	local order = state.currentOrder
+	if order and os.clock() > order.deadlineAt and not order.ready then
+		failOrder(state, "timeout")
+		moveToRegisterIfReady(state)
+	end
 end
 
-local function startTimeoutLoop(state)
-	state.timeoutTask = task.spawn(function()
-		while state.active do
-			task.wait(1)
-			local order = state.currentOrder
-			if order and os.clock() > order.deadlineAt and not order.ready then
-				failOrder(state, "timeout")
-				processFront(state)
-			end
-		end
-	end)
-end
-
-function StartClientSystem.Start(player, business)
-	if not business then
+function StartClientSystem.StartForPlayer(player, business)
+	if not business or not business.kiosk then
 		warn("[ClientSystem] Business missing for player", player.UserId)
 		return nil
 	end
 
+	local flow = business.kiosk:WaitForChild("ClientFlow")
+	local queueFolder = flow:WaitForChild("Queue")
+	local spots = {}
+	for _, child in ipairs(queueFolder:GetChildren()) do
+		local index = tonumber(string.match(child.Name, "^Spot_(%d+)$"))
+		if index then
+			spots[index] = child
+		end
+	end
+
+	local sortedSpots = {}
+	for index = 1, #spots do
+		if spots[index] then
+			table.insert(sortedSpots, spots[index])
+		end
+	end
+
+	print(string.format("[ClientSystem] player=%s spots=%d names=%s", player.UserId, #sortedSpots, logSpotNames(sortedSpots)))
+
+	local cashPrompts = business.cashRegisterPrompts or {}
+	local takeOrderPrompt = nil
+	local servePrompt = nil
+	for _, prompt in ipairs(cashPrompts) do
+		if prompt.Name == "TakeOrder" then
+			takeOrderPrompt = prompt
+		elseif prompt.Name == "ServeOrder" or prompt.Name == "PayOrder" then
+			servePrompt = prompt
+		end
+	end
+
+	if not takeOrderPrompt then
+		takeOrderPrompt = cashPrompts[1]
+	end
+
 	local state = {
 		player = player,
-		kiosk = business.kiosk,
+		business = business,
 		clientsFolder = business.clientsFolder,
 		spawnPoint = business.spawnPoint,
 		endPoint = business.endPoint,
 		orderPoint = business.orderPoint,
-		queueSpots = business.queueSpots,
-		cashRegisterPrompt = business.cashRegisterPrompt,
-		grillPrompt = business.grillPrompt,
-		drinkPrompt = business.drinkPrompt,
-		queue = QueueService.new(),
+		queueSpots = sortedSpots,
+		queueOrder = {},
 		clients = {},
 		currentAtRegister = nil,
 		currentOrder = nil,
 		servedCount = 0,
+		clientCounter = 0,
 		lastStatsSent = 0,
+		nextSpawnAt = os.clock() + math.random(SPAWN_MIN, SPAWN_MAX),
+		grillPrompts = business.grillPrompts or {},
+		drinkPrompts = business.drinkPrompts or {},
+		takeOrderPrompt = takeOrderPrompt,
+		servePrompt = servePrompt,
 		active = true,
 	}
 
-	state.queue:SetSpots(state.queueSpots)
-	state.queue:SetOnAssign(function(assignments)
-		updateQueueAssignments(state, assignments)
+	bindPrompts(state)
+
+	Active[player] = state
+
+	state.loop = task.spawn(function()
+		while state.active do
+			update(state)
+			task.wait(0.3)
+		end
 	end)
 
-	bindPrompts(state)
-	startSpawnLoop(state)
-	startTimeoutLoop(state)
-
-	ActiveBusinesses[player] = state
-	return {
-		Stop = function()
-			state.active = false
-			ActiveBusinesses[player] = nil
-			if state.currentAtRegister then
-				state.currentAtRegister:Destroy()
-			end
-			for _, data in pairs(state.clients) do
-				if data.model and data.model.Parent then
-					data.model:Destroy()
-				end
-			end
-		end,
-	}
+	return state
 end
 
-function StartClientSystem.Stop(player)
-	local state = ActiveBusinesses[player]
+function StartClientSystem.StopForPlayer(player)
+	local state = Active[player]
 	if not state then
 		return
 	end
+
 	state.active = false
-	ActiveBusinesses[player] = nil
+	Active[player] = nil
+
+	if state.loop then
+		-- loop exits on active=false
+	end
+
+	for _, client in pairs(state.clients) do
+		if client.model and client.model.Parent then
+			client.model:Destroy()
+		end
+	end
 end
 
 Players.PlayerRemoving:Connect(function(player)
-	StartClientSystem.Stop(player)
+	StartClientSystem.StopForPlayer(player)
 end)
 
 return StartClientSystem

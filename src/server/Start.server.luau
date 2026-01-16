@@ -1,22 +1,47 @@
 local SSS = game:GetService("ServerScriptService")
+local Players = game:GetService("Players")
+
 local Core = SSS:WaitForChild("Core")
 local Systems = SSS:WaitForChild("Systems")
 
-local Config = require(Core:WaitForChild("Config"))
-local FoodConfig = require(Core:WaitForChild("FoodConfig"))
-local SaveService = require(Core:WaitForChild("SaveService"))
-local PlayerService = require(Core:WaitForChild("PlayerService"))
-local OrderGenerator = require(Core:WaitForChild("OrderGenerator"))
-local OrderService = require(Core:WaitForChild("OrderService"))
-local RemoteSetup = require(Core:WaitForChild("RemoteSetup"))
-local HealthCheck = require(Core:WaitForChild("HealthCheck"))
-local RemoteHandlers = require(Core:WaitForChild("RemoteHandlers"))
+local function safeRequire(moduleInstance)
+	local ok, result = pcall(require, moduleInstance)
+	if not ok then
+		error(("Failed to require %s: %s"):format(moduleInstance:GetFullName(), tostring(result)))
+	end
+	return result
+end
+
+local Config = safeRequire(Core:WaitForChild("Config"))
+local FoodConfig = safeRequire(Core:WaitForChild("FoodConfig"))
+local SaveService = safeRequire(Core:WaitForChild("SaveService"))
+local PlayerService = safeRequire(Core:WaitForChild("PlayerService"))
+local OrderGenerator = safeRequire(Core:WaitForChild("OrderGenerator"))
+local OrderService = safeRequire(Core:WaitForChild("OrderService"))
+local RemoteSetup = safeRequire(Core:WaitForChild("RemoteSetup"))
+local HealthCheck = safeRequire(Core:WaitForChild("HealthCheck"))
+local RemoteHandlers = safeRequire(Core:WaitForChild("RemoteHandlers"))
 
 local ClientSystemFolder = Systems:WaitForChild("ClientSystem")
-local StartClientSystem = require(ClientSystemFolder:WaitForChild("StartClientSystem"))
+local StartClientSystem = safeRequire(ClientSystemFolder:WaitForChild("StartClientSystem"))
 
 RemoteSetup.EnsureRemotes()
 HealthCheck.Run()
 RemoteHandlers.Bind()
+
+Players.PlayerAdded:Connect(function(player)
+	SaveService.Load(player)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	SaveService.Save(player)
+	SaveService.Release(player)
+end)
+
+game:BindToClose(function()
+	for _, player in ipairs(Players:GetPlayers()) do
+		SaveService.Save(player)
+	end
+end)
 
 print("[SERVER] Start OK")

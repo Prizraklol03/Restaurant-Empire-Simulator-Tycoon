@@ -4,7 +4,6 @@
 local Players = game:GetService("Players")
 local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local PhysicsService = game:GetService("PhysicsService")
 
 local Config = require(game.ServerScriptService.Core.Config)
 local PlayerService = require(game.ServerScriptService.Core.PlayerService)
@@ -25,34 +24,6 @@ local Active = {}
 
 local SPAWN_MIN = 3
 local SPAWN_MAX = 6
-local COLLISION_GROUP = "NPC"
-local collisionReady = false
-
-local function ensureCollisionGroup()
-	if collisionReady then
-		return
-	end
-
-	local ok = pcall(function()
-		PhysicsService:CreateCollisionGroup(COLLISION_GROUP)
-	end)
-
-	pcall(function()
-		PhysicsService:CollisionGroupSetCollidable(COLLISION_GROUP, COLLISION_GROUP, false)
-	end)
-
-	collisionReady = true
-end
-
-local function applyNpcCollision(model)
-	ensureCollisionGroup()
-	for _, descendant in ipairs(model:GetDescendants()) do
-		if descendant:IsA("BasePart") then
-			descendant.CanCollide = false
-			PhysicsService:SetPartCollisionGroup(descendant, COLLISION_GROUP)
-		end
-	end
-end
 
 local function getSpotPosition(spot)
 	if not spot then
@@ -115,29 +86,72 @@ local function getClientRoot(model)
 	return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
 end
 
+local function moveToAndConfirm(model, targetPos, radius, timeout)
+	if not model then
+		return false
+	end
+
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	local root = getClientRoot(model)
+	if not humanoid or not root then
+		return false
+	end
+
+	humanoid:MoveTo(targetPos)
+
+	local deadline = os.clock() + timeout
+	while os.clock() < deadline do
+		if (root.Position - targetPos).Magnitude <= radius then
+			return true
+		end
+		task.wait(0.15)
+	end
+
+	return false
+end
+
 local function assignClientToSpot(state, clientId, spotIndex)
 	if state.spotOccupant[spotIndex] then
 		warn(string.format("[QueueAssign] spot %d already occupied", spotIndex))
-		return
+		return false
 	end
 
 	local client = state.clients[clientId]
 	if not client or not client.model then
-		return
+		return false
 	end
 
 	state.spotOccupant[spotIndex] = clientId
 	state.clientSpotIndex[clientId] = spotIndex
+	client.state = "Queue"
 
 	local pos = getSpotPosition(state.queueSpots[spotIndex])
 	if not pos then
-		return
+		return false
 	end
 
 	client.atSpot = false
-	print(string.format("[QueueAssign] clientId=%s spot=%d", clientId, spotIndex))
-	local reached = ClientAI.MoveTo(client.model, pos, 6)
+	client.moveToken += 1
+	local token = client.moveToken
+
+	local reached = moveToAndConfirm(client.model, pos, 1.6, 6)
+	if not reached then
+		reached = moveToAndConfirm(client.model, pos, 1.6, 6)
+	end
+
+	if token ~= client.moveToken then
+		return false
+	end
+
 	client.atSpot = reached
+	print(string.format("[QueueAssign] clientId=%s spot=%d reached=%s", clientId, spotIndex, tostring(reached)))
+	if not reached then
+		state.spotOccupant[spotIndex] = nil
+		state.clientSpotIndex[clientId] = nil
+		return false
+	end
+
+	return true
 end
 
 local function shiftQueueForward(state)
@@ -149,15 +163,32 @@ local function shiftQueueForward(state)
 			state.clientSpotIndex[clientId] = index
 
 			local client = state.clients[clientId]
+			local reached = false
 			if client and client.model then
+				client.state = "Queue"
 				client.atSpot = false
+				client.moveToken += 1
+				local token = client.moveToken
 				local pos = getSpotPosition(state.queueSpots[index])
 				if pos then
-					print(string.format("[QueueShift] clientId=%s %d->%d", clientId, index + 1, index))
-					local reached = ClientAI.MoveTo(client.model, pos, 5)
+					reached = moveToAndConfirm(client.model, pos, 1.6, 6)
+					if not reached then
+						reached = moveToAndConfirm(client.model, pos, 1.6, 6)
+					end
+				end
+				if token == client.moveToken then
 					client.atSpot = reached
 				end
 			end
+
+			if not reached then
+				warn("[QueueShift] failed move, reverting", clientId, index)
+				state.spotOccupant[index + 1] = clientId
+				state.spotOccupant[index] = nil
+				state.clientSpotIndex[clientId] = index + 1
+			end
+
+			print(string.format("[QueueShift] clientId=%d %d->%d reached=%s", clientId, index + 1, index, tostring(reached)))
 		end
 	end
 
@@ -172,7 +203,7 @@ local function spawnClient(state)
 	end
 
 	local freeSpot = nil
-	for index = #state.queueSpots, 1, -1 do
+	for index = 1, #state.queueSpots do
 		if state.spotOccupant[index] == nil then
 			freeSpot = index
 			break
@@ -194,41 +225,18 @@ local function spawnClient(state)
 		model:PivotTo(state.spawnPoint.CFrame)
 	end
 
-	applyNpcCollision(model)
-
 	state.clients[clientId] = {
 		model = model,
 		state = "Queue",
 		spotIndex = nil,
 		atSpot = false,
+		moveToken = 0,
 	}
 
 	print(string.format("[Spawn] player=%s clientId=%s queueSize=%d/%d", state.player.UserId, clientId, countQueue(state), #state.queueSpots))
 	assignClientToSpot(state, clientId, freeSpot)
 	logOccupancy(state)
 	updateBusinessStats(state)
-end
-
-local function waitSpotFreed(state, clientId, spotIndex)
-	local client = state.clients[clientId]
-	local spot = state.queueSpots[spotIndex]
-	if not client or not client.model or not spot then
-		return
-	end
-
-	local pos = getSpotPosition(spot)
-	local root = getClientRoot(client.model)
-	if not pos or not root then
-		return
-	end
-
-	local deadline = os.clock() + 5
-	while os.clock() < deadline do
-		if (root.Position - pos).Magnitude > 4 then
-			return
-		end
-		task.wait(0.1)
-	end
 end
 
 local function promoteToRegister(state)
@@ -242,7 +250,17 @@ local function promoteToRegister(state)
 	end
 
 	local frontClient = state.clients[frontId]
-	if not frontClient or not frontClient.atSpot then
+	if not frontClient or not frontClient.model then
+		return
+	end
+
+	local spotPos = getSpotPosition(state.queueSpots[1])
+	local root = getClientRoot(frontClient.model)
+	if not spotPos or not root then
+		return
+	end
+
+	if (root.Position - spotPos).Magnitude > 1.8 then
 		return
 	end
 
@@ -251,14 +269,21 @@ local function promoteToRegister(state)
 	frontClient.atSpot = false
 
 	local pos = getSpotPosition(state.orderPoint)
-	if pos and frontClient.model then
+	if pos then
 		print(string.format("[PromoteToRegister] clientId=%s", frontId))
-		ClientAI.MoveTo(frontClient.model, pos, 8)
-		waitSpotFreed(state, frontId, 1)
-		state.spotOccupant[1] = nil
-		state.clientSpotIndex[frontId] = nil
-		print(string.format("[PromoteToRegister] clientId=%s freed Spot_1", frontId))
-		shiftQueueForward(state)
+		frontClient.moveToken += 1
+		local token = frontClient.moveToken
+		moveToAndConfirm(frontClient.model, pos, 2.0, 8)
+		if token ~= frontClient.moveToken then
+			return
+		end
+
+		if (root.Position - spotPos).Magnitude > 3.5 then
+			state.spotOccupant[1] = nil
+			state.clientSpotIndex[frontId] = nil
+			print(string.format("[PromoteToRegister] clientId=%s freed Spot_1", frontId))
+			shiftQueueForward(state)
+		end
 	end
 end
 
@@ -302,6 +327,7 @@ local function createOrder(state)
 	}
 
 	print(string.format("[Order] created player=%s clientId=%s orderId=%s", state.player.UserId, clientId, order.id))
+	print("[HOWTO] Нажми GRILL/DRINK чтобы приготовить")
 
 	sendCashRegister(state, {
 		v = 1,
@@ -335,7 +361,8 @@ local function completeOrder(state)
 		local pos = getSpotPosition(state.endPoint)
 		if pos then
 			client.state = "Exit"
-			ClientAI.MoveTo(client.model, pos, 8)
+			client.moveToken += 1
+			moveToAndConfirm(client.model, pos, 2.0, 8)
 			client.model:Destroy()
 			state.clients[clientId] = nil
 		end
@@ -367,7 +394,8 @@ local function failOrder(state, reason)
 		local pos = getSpotPosition(state.endPoint)
 		if pos then
 			client.state = "Exit"
-			ClientAI.MoveTo(client.model, pos, 8)
+			client.moveToken += 1
+			moveToAndConfirm(client.model, pos, 2.0, 8)
 			client.model:Destroy()
 			state.clients[clientId] = nil
 		end
@@ -412,6 +440,7 @@ local function startCooking(state, stationType)
 		order.ready = true
 		order.state = "READY"
 		print(string.format("[Cook] ready player=%s orderId=%s", state.player.UserId, order.orderId))
+		print("[HOWTO] Нажми кассу чтобы отдать")
 
 		sendCashRegister(state, {
 			v = 1,

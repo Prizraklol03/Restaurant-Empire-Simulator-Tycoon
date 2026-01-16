@@ -18,6 +18,7 @@ local SaveService = safeRequire(Core:WaitForChild("SaveService"))
 local PlayerService = safeRequire(Core:WaitForChild("PlayerService"))
 local OrderGenerator = safeRequire(Core:WaitForChild("OrderGenerator"))
 local OrderService = safeRequire(Core:WaitForChild("OrderService"))
+local BusinessService = safeRequire(Core:WaitForChild("BusinessService"))
 local RemoteSetup = safeRequire(Core:WaitForChild("RemoteSetup"))
 local HealthCheck = safeRequire(Core:WaitForChild("HealthCheck"))
 local RemoteHandlers = safeRequire(Core:WaitForChild("RemoteHandlers"))
@@ -25,15 +26,31 @@ local RemoteHandlers = safeRequire(Core:WaitForChild("RemoteHandlers"))
 local ClientSystemFolder = Systems:WaitForChild("ClientSystem")
 local StartClientSystem = safeRequire(ClientSystemFolder:WaitForChild("StartClientSystem"))
 
+local activeSystems = {}
+
 RemoteSetup.EnsureRemotes()
 HealthCheck.Run()
 RemoteHandlers.Bind()
 
 Players.PlayerAdded:Connect(function(player)
 	SaveService.Load(player)
+	local business = BusinessService.CreateBusiness(player)
+	if business then
+		local system = StartClientSystem.Start(player, business)
+		activeSystems[player] = system
+	else
+		warn("[SERVER] Business creation failed for", player.UserId)
+	end
 end)
 
 Players.PlayerRemoving:Connect(function(player)
+	local system = activeSystems[player]
+	if system and system.Stop then
+		system:Stop()
+	end
+
+	activeSystems[player] = nil
+	BusinessService.RemoveBusiness(player)
 	SaveService.Save(player)
 	SaveService.Release(player)
 end)

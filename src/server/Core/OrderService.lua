@@ -27,11 +27,11 @@ local OrderStatus = {
 ---------------------------------------------------------------------
 
 local TIME_CONFIG = {
-	BaseBuffer = 8,      -- B
+	BaseBuffer = 8, -- B
 	ComplexityFactor = 1.3, -- α
-	PerItemBuffer = 2,  -- K
-	MinWait = 12,       -- Tmin
-	MaxWait = 90,       -- Tmax
+	PerItemBuffer = 2, -- K
+	MinWait = 12, -- Tmin
+	MaxWait = 90, -- Tmax
 }
 
 ---------------------------------------------------------------------
@@ -55,7 +55,6 @@ local function calculatePrice(items)
 	return total
 end
 
--- Tcook = сумма BaseCookTime * quantity
 local function calculateCookTime(items)
 	local total = 0
 
@@ -84,13 +83,26 @@ local function calculateWaitTime(cookTime, itemCount)
 	return clamp(raw, cfg.MinWait, cfg.MaxWait)
 end
 
+local function pickStationType(items)
+	for foodId in pairs(items) do
+		local food = FoodConfig.GetFoodById(foodId)
+		if food and food.Station then
+			return food.Station
+		end
+	end
+
+	return "GRILL"
+end
+
 ---------------------------------------------------------------------
 -- PUBLIC API
 ---------------------------------------------------------------------
 
--- items = { Burger = { quantity = 2 }, Coffee = { quantity = 1 } }
-function OrderService.CreateOrder(player, items)
+function OrderService.CreateOrder(player, clientId, context)
 	assert(player, "[OrderService] player is required")
+	assert(clientId, "[OrderService] clientId is required")
+
+	local items = context and context.items or {}
 	assert(type(items) == "table", "[OrderService] items must be table")
 
 	local orderId = generateOrderId()
@@ -108,10 +120,13 @@ function OrderService.CreateOrder(player, items)
 	local order = {
 		id = orderId,
 		player = player,
+		clientId = clientId,
+		location = context and context.location or "Kiosk",
 
 		items = items,
 		price = price,
 
+		stationType = pickStationType(items),
 		cookTime = cookTime,
 		waitTime = waitTime,
 		deadlineAt = now + waitTime,
@@ -126,12 +141,13 @@ function OrderService.CreateOrder(player, items)
 	EventBus.Fire("ORDER_CREATED", {
 		orderId = orderId,
 		player = player,
+		clientId = clientId,
 		items = items,
 		price = price,
 		waitTime = waitTime,
 	})
 
-	return orderId
+	return order
 end
 
 function OrderService.AcceptOrder(orderId)
@@ -162,7 +178,7 @@ function OrderService.CompleteOrder(orderId)
 		return false, "ORDER_NOT_FOUND"
 	end
 
-	if order.status ~= OrderStatus.ACCEPTED then
+	if order.status ~= OrderStatus.CREATED and order.status ~= OrderStatus.ACCEPTED then
 		return false, "INVALID_STATUS"
 	end
 

@@ -1,364 +1,368 @@
---[[
-	StartClientSystem.lua
+-- StartClientSystem.lua
+-- Orchestrates kiosk loop per player
 
-	ЕДИНСТВЕННЫЙ ОРКЕСТРАТОР ЖИЗНИ NPC
-
-	Источник истины:
-	- Config.lua (ТОЛЬКО ТВОЙ, КОТОРЫЙ ТЫ СКИНУЛ)
-	- Контракты 3.0.txt
-	- Блок-схема Client Flow
-
-	ЗАПРЕЩЕНО:
-	- таймеры спавна
-	- логика в ClientAI
-	- логика в QueueService
-	- доступ к OrderService минуя события
-]]
-
----------------------------------------------------------------------
--- DEPENDENCIES
----------------------------------------------------------------------
-
+local Players = game:GetService("Players")
 local ServerStorage = game:GetService("ServerStorage")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(game.ServerScriptService.Core.Config)
 local PlayerService = require(game.ServerScriptService.Core.PlayerService)
+local OrderGenerator = require(game.ServerScriptService.Core.OrderGenerator)
 local OrderService = require(game.ServerScriptService.Core.OrderService)
-local OrderPointService = require(game.ServerScriptService.Core.OrderPointService)
-local EventBus = require(game.ServerScriptService.Core.EventBus)
 
-local ClientSystemFolder = script.Parent
-local Modules = ClientSystemFolder:WaitForChild("Modules")
+local Net = require(ReplicatedStorage.Shared.Net)
 
+local Modules = script.Parent:WaitForChild("Modules")
 local ClientAI = require(Modules:WaitForChild("ClientAI"))
 local QueueService = require(Modules:WaitForChild("QueueService"))
-local ClientRegistry = require(ClientSystemFolder:WaitForChild("ClientRegistry"))
 
----------------------------------------------------------------------
--- PUBLIC API
----------------------------------------------------------------------
+local UpdateBusinessStats = Net.GetRemoteEvent("UpdateBusinessStats")
+local UpdateCashRegisterUI = Net.GetRemoteEvent("UpdateCashRegisterUI")
 
 local StartClientSystem = {}
 
----------------------------------------------------------------------
--- MANAGER
----------------------------------------------------------------------
+local ActiveBusinesses = {}
 
-local Manager = {}
-Manager.__index = Manager
-
----------------------------------------------------------------------
--- CONSTRUCTOR
----------------------------------------------------------------------
-
-function Manager.new(player, businessModel)
-	local self = setmetatable({}, Manager)
-
-	-----------------------------------------------------------------
-	-- CORE REFERENCES
-	-----------------------------------------------------------------
-
-	self.player = player
-	self.businessModel = businessModel
-	self.alive = true
-
-	-----------------------------------------------------------------
-	-- SCENE CONTRACT (ЖЁСТКИЙ)
-	-----------------------------------------------------------------
-
-	local flow = businessModel:WaitForChild("ClientFlow")
-
-	self.spawnPoint = flow:WaitForChild("ClientSpawn")
-	self.orderPoint = flow:WaitForChild("OrderPoint")
-	self.exitPoint = flow:WaitForChild("ClientEnd")
-
-	self.cashRegister = businessModel:FindFirstChild("CashRegister", true)
-	assert(self.cashRegister, "[ClientSystem] CashRegister not found")
-
-	self.currentClientValue = self.cashRegister:FindFirstChild("CurrentClient")
-	assert(
-		self.currentClientValue and self.currentClientValue:IsA("ObjectValue"),
-		"[ClientSystem] CashRegister.CurrentClient (ObjectValue) is missing"
-	)
-
-	-----------------------------------------------------------------
-	-- CONFIG (ЕДИНСТВЕННЫЙ ИСТОЧНИК)
-	-----------------------------------------------------------------
-
-	local profile = PlayerService:GetProfile(player)
-	local level = profile and profile.BusinessLevel or 1
-
-	self.locationCfg = Config.GetLocationConfig(level)
-
-	self.maxWaitTime = Config.Customers.MaxWaitTime
-	self.maxOrderProcessTime = Config.Customers.MaxOrderProcessTime
-	self.registerRadius = Config.Customers.RegisterRadius
-
-	self.npcTemplateName = Config.Customers.Models[1]
-
-	-----------------------------------------------------------------
-	-- STATE
-	-----------------------------------------------------------------
-
-	self.queue = QueueService.new(businessModel)
-
-	self.npcs = {} -- clientId -> npcData
-	self.activeRegisterClientId = nil
-
-	-----------------------------------------------------------------
-	-- INIT FSM
-	-----------------------------------------------------------------
-
-	OrderPointService.InitPlayer(player)
-
-	-----------------------------------------------------------------
-	-- EVENTS & START
-	-----------------------------------------------------------------
-
-	self:_bindEvents()
-	self:_trySpawnNpc() -- первая попытка
-
-	return self
+local function getClientTemplate()
+	return ServerStorage:FindFirstChild("ClientTemplate")
 end
 
----------------------------------------------------------------------
--- SPAWN LOGIC (EVENT-DRIVEN)
----------------------------------------------------------------------
+local function setModelPosition(model, target)
+	if not model then
+		return
+	end
 
-function Manager:_canSpawnNpc()
-	if not self.alive then
+	local primary = model.PrimaryPart or model:FindFirstChild("HumanoidRootPart")
+	if primary then
+		model:PivotTo(target)
+	end
+end
+
+local function getClientId(model)
+	return model and model:GetAttribute("ClientId")
+end
+
+local function createClient(state)
+	local template = getClientTemplate()
+	if not template then
+		warn("[ClientSystem] ClientTemplate missing")
+		return nil
+	end
+
+	local clientModel = template:Clone()
+	local clientId = tostring(game:GetService("HttpService"):GenerateGUID(false))
+	clientModel:SetAttribute("ClientId", clientId)
+	clientModel:SetAttribute("OwnerUserId", state.player.UserId)
+
+	clientModel.Parent = state.clientsFolder
+	setModelPosition(clientModel, state.spawnPoint.CFrame)
+
+	state.clients[clientId] = {
+		model = clientModel,
+		spawnedAt = os.clock(),
+	}
+
+	return clientModel
+end
+
+local function updateQueueAssignments(state, assignments)
+	for model, spot in pairs(assignments) do
+		if model and model.Parent then
+			ClientAI.MoveTo(model, spot.Position, 6)
+		end
+	end
+end
+
+local function enqueueClient(state, clientModel)
+	local spotIndex = state.queue:Join(clientModel)
+	if not spotIndex then
+		clientModel:Destroy()
 		return false
 	end
-
-	return Config.CanSpawnClient(
-		self.locationCfg.Level,
-		self.queue:GetSize()
-	)
+	return true
 end
 
-function Manager:_trySpawnNpc()
-	if not self:_canSpawnNpc() then
+local function sendBusinessStats(state)
+	local now = os.clock()
+	if now - state.lastStatsSent < 1 then
 		return
 	end
 
-	local spawnRate = Config.GetClientSpawnRate(
-		self.locationCfg.Level,
-		PlayerService:GetUpgrades(self.player)
-	)
+	state.lastStatsSent = now
+	UpdateBusinessStats:FireClient(state.player, {
+		v = 1,
+		money = PlayerService.GetMoney(state.player),
+		servedCount = state.servedCount,
+		queueSize = state.queue:GetSize(),
+		location = "Kiosk",
+	})
+end
 
-	if math.random() > spawnRate then
+local function sendCashRegister(state, payload)
+	UpdateCashRegisterUI:FireClient(state.player, payload)
+end
+
+local function createOrderForClient(state, clientModel)
+	local clientId = getClientId(clientModel)
+	if not clientId then
+		return nil
+	end
+
+	local items = OrderGenerator.Generate({
+		menuLevel = 1,
+		stationLevels = PlayerService.GetStationLevels(state.player),
+		unlockedFoods = PlayerService.GetSave(state.player).Business.UnlockedFoods,
+	})
+
+	local order = OrderService.CreateOrder(state.player, clientId, {
+		items = items,
+		location = "Kiosk",
+	})
+
+	if not order then
+		return nil
+	end
+
+	state.currentOrder = order
+	state.currentAtRegister = clientModel
+
+	sendCashRegister(state, {
+		v = 1,
+		state = "ORDER_CREATED",
+		clientId = clientId,
+		orderId = order.id,
+		items = order.items,
+		stationType = order.stationType,
+		cookTime = order.cookTime,
+		deadlineAt = order.deadlineAt,
+	})
+
+	return order
+end
+
+local function processFront(state)
+	if state.currentAtRegister or state.currentOrder then
 		return
 	end
 
-	-- Создание NPC
-	local template = ServerStorage:WaitForChild(self.npcTemplateName)
-	local npcModel = template:Clone()
-	npcModel.Parent = self.businessModel
-	npcModel:PivotTo(self.spawnPoint.CFrame)
+	local frontModel = state.queue:GetFront()
+	if not frontModel then
+		return
+	end
 
-	-- Назначаем имя клиенту
-	local names = Config.Customers.Names
-	local clientName = names[math.random(1, #names)]
-	npcModel:SetAttribute("ClientName", clientName)
+	state.queue:Leave(frontModel)
+	local reached = ClientAI.MoveTo(frontModel, state.orderPoint.Position, 8)
+	if not reached then
+		frontModel:Destroy()
+		return
+	end
 
-	-- Создаём мозг
-	local brain = ClientAI.new(npcModel, self.player)
-	ClientRegistry.Register(npcModel, brain)
+	createOrderForClient(state, frontModel)
+end
 
-	local clientId = brain:GetClientId()
+local function failOrder(state, reason)
+	local order = state.currentOrder
+	if not order then
+		return
+	end
 
-	-- Инициализация состояния NPC
-	self.npcs[clientId] = {
-		brain = brain,
+	OrderService.FailOrder(order.id, reason)
+	sendCashRegister(state, {
+		v = 1,
+		state = "FAILED",
+		reason = reason,
+		orderId = order.id,
+	})
 
-		queueWaitStart = nil,      -- стартует при первом достижении Spot
-		orderProcessStart = nil,   -- стартует при принятии заказа
+	if state.currentAtRegister then
+		ClientAI.MoveTo(state.currentAtRegister, state.endPoint.Position, 8)
+		state.currentAtRegister:Destroy()
+	end
 
-		orderAccepted = false,
-		exiting = false,
+	state.currentOrder = nil
+	state.currentAtRegister = nil
+	sendBusinessStats(state)
+end
+
+local function completeOrder(state)
+	local order = state.currentOrder
+	if not order then
+		return
+	end
+
+	OrderService.CompleteOrder(order.id)
+	PlayerService.AddMoney(state.player, order.price or 0)
+	state.servedCount += 1
+
+	sendBusinessStats(state)
+
+	if state.currentAtRegister then
+		ClientAI.MoveTo(state.currentAtRegister, state.endPoint.Position, 8)
+		state.currentAtRegister:Destroy()
+	end
+
+	state.currentOrder = nil
+	state.currentAtRegister = nil
+end
+
+local function startCooking(state, stationType)
+	local order = state.currentOrder
+	if not order or order.ready or order.cooking then
+		return
+	end
+
+	if order.stationType ~= stationType then
+		return
+	end
+
+	order.cooking = true
+	sendCashRegister(state, {
+		v = 1,
+		state = "COOKING",
+		orderId = order.id,
+		stationType = stationType,
+		cookTime = order.cookTime,
+	})
+
+	task.delay(order.cookTime, function()
+		if state.currentOrder ~= order then
+			return
+		end
+
+		order.ready = true
+		order.cooking = false
+
+		sendCashRegister(state, {
+			v = 1,
+			state = "READY",
+			orderId = order.id,
+		})
+	end)
+end
+
+local function bindPrompts(state)
+	state.cashRegisterPrompt.Triggered:Connect(function(player)
+		if player ~= state.player then
+			return
+		end
+
+		local order = state.currentOrder
+		if not order or not order.ready then
+			return
+		end
+
+		completeOrder(state)
+		processFront(state)
+	end)
+
+	state.grillPrompt.Triggered:Connect(function(player)
+		if player ~= state.player then
+			return
+		end
+		startCooking(state, "GRILL")
+	end)
+
+	state.drinkPrompt.Triggered:Connect(function(player)
+		if player ~= state.player then
+			return
+		end
+		startCooking(state, "DRINK")
+	end)
+end
+
+local function startSpawnLoop(state)
+	state.spawnTask = task.spawn(function()
+		while state.active do
+			task.wait(math.random(6, 10))
+			if state.queue:GetSize() >= state.queue:GetCapacity() then
+				continue
+			end
+
+			local clientModel = createClient(state)
+			if clientModel then
+				enqueueClient(state, clientModel)
+				processFront(state)
+			end
+		end
+	end)
+end
+
+local function startTimeoutLoop(state)
+	state.timeoutTask = task.spawn(function()
+		while state.active do
+			task.wait(1)
+			local order = state.currentOrder
+			if order and os.clock() > order.deadlineAt and not order.ready then
+				failOrder(state, "timeout")
+				processFront(state)
+			end
+		end
+	end)
+end
+
+function StartClientSystem.Start(player, business)
+	if not business then
+		warn("[ClientSystem] Business missing for player", player.UserId)
+		return nil
+	end
+
+	local state = {
+		player = player,
+		kiosk = business.kiosk,
+		clientsFolder = business.clientsFolder,
+		spawnPoint = business.spawnPoint,
+		endPoint = business.endPoint,
+		orderPoint = business.orderPoint,
+		queueSpots = business.queueSpots,
+		cashRegisterPrompt = business.cashRegisterPrompt,
+		grillPrompt = business.grillPrompt,
+		drinkPrompt = business.drinkPrompt,
+		queue = QueueService.new(),
+		clients = {},
+		currentAtRegister = nil,
+		currentOrder = nil,
+		servedCount = 0,
+		lastStatsSent = 0,
+		active = true,
 	}
 
-	-- Вход в очередь
-	self.queue:Join(brain)
-end
-
-
----------------------------------------------------------------------
--- MAIN TICK (TIMEOUTS + FLOW)
----------------------------------------------------------------------
-
-function Manager:_tick()
-	local now = os.clock()
-
-	for clientId, npc in pairs(self.npcs) do
-		if npc.exiting then
-			continue
-		end
-
-		-- ОЖИДАНИЕ В ОЧЕРЕДИ (до принятия заказа)
-		if not npc.orderAccepted and npc.queueWaitStart then
-			if now - npc.queueWaitStart >= Config.Customers.MaxWaitTime then
-				self:_requestExit(clientId, "QUEUE_TIMEOUT")
-			end
-		end
-
-		-- ОБРАБОТКА ЗАКАЗА
-		if npc.orderProcessStart then
-			if now - npc.orderProcessStart >= Config.Customers.MaxOrderProcessTime then
-				self:_requestExit(clientId, "ORDER_PROCESS_TIMEOUT")
-			end
-		end
-	end
-
-	-- Проверяем, можно ли продвинуть очередь
-	self:_tryMoveFrontToRegister()
-end
-
-
----------------------------------------------------------------------
--- QUEUE → REGISTER
----------------------------------------------------------------------
-
-function Manager:_tryMoveFrontToRegister()
-	if self.activeRegisterClientId then
-		return
-	end
-
-	if OrderPointService.GetState(self.player) ~= OrderPointService.States.EMPTY then
-		return
-	end
-
-	local brain = self.queue:GetFront()
-	if not brain then
-		return
-	end
-
-	self.queue:Leave(brain)
-
-	local clientId = brain:GetClientId()
-	self.activeRegisterClientId = clientId
-
-	brain:GoToRegister(self.orderPoint)
-	OrderPointService.ClientArrived(self.player, brain)
-end
-
----------------------------------------------------------------------
--- EXIT
----------------------------------------------------------------------
-
-function Manager:_requestExit(clientId, reason)
-	local npc = self.npcs[clientId]
-	if not npc or npc.exiting then
-		return
-	end
-
-	npc.exiting = true
-	
-	self.queue:LeaveByClientId(clientId)
-
-	-- Если NPC был у кассы — освобождаем её
-	if self.activeRegisterClientId == clientId then
-		self.activeRegisterClientId = nil
-		self.currentClientValue.Value = nil
-		OrderPointService.ClientExit(self.player)
-	end
-
-	npc.brain:RequestExit(self.exitPoint, reason)
-	
-	self.npcs[clientId] = nil
-	self:_trySpawnNpc()
-end
-
-
----------------------------------------------------------------------
--- EVENT BUS
----------------------------------------------------------------------
-
-function Manager:_bindEvents()
-
-	EventBus.Connect("NPC_REACHED_REGISTER", function(data)
-		if data.player ~= self.player then return end
-
-		self.currentClientValue.Value = data.npc
+	state.queue:SetSpots(state.queueSpots)
+	state.queue:SetOnAssign(function(assignments)
+		updateQueueAssignments(state, assignments)
 	end)
 
-	EventBus.Connect("ORDER_CREATED", function(data)
-		if data.player ~= self.player then return end
+	bindPrompts(state)
+	startSpawnLoop(state)
+	startTimeoutLoop(state)
 
-		local npc = self.npcs[data.clientId]
-		if not npc or npc.exiting then return end
-
-		npc.orderAccepted = true
-		npc.orderProcessStart = os.clock()
-
-		-- Очередь закончилась
-		npc.queueWaitStart = nil
-
-		OrderPointService.OrderAccepted(
-			self.player,
-			data.npcBrain,
-			data.orderId
-		)
-	end)
-
-
-	EventBus.Connect("OrderServed", function(data)
-		if data.player ~= self.player then return end
-		self:_requestExit(data.clientId, "SERVED")
-	end)
-
-	EventBus.Connect("NPC_REACHED_SPOT", function(data)
-		if data.player ~= self.player then return end
-
-		local npc = self.npcs[data.clientId]
-		if not npc or npc.exiting then return end
-
-		-- Первый раз встал в очередь → запускаем таймер ожидания
-		if npc.queueWaitStart == nil then
-			npc.queueWaitStart = os.clock()
-		end
-	end)
-end
-
----------------------------------------------------------------------
--- STOP
----------------------------------------------------------------------
-
-function Manager:Stop()
-	self.alive = false
-
-	for clientId, npc in pairs(self.npcs) do
-		npc.brain:RequestExit(self.exitPoint, "FORCE_BUSINESS_REMOVED")
-		self.queue:LeaveByClientId(clientId)
-	end
-
-	self.npcs = {}
-	self.activeRegisterClientId = nil
-	self.currentClientValue.Value = nil
-
-	OrderPointService.RemovePlayer(self.player)
-end
-
----------------------------------------------------------------------
--- ENTRY POINT
----------------------------------------------------------------------
-
-function StartClientSystem.Start(player, businessModel)
-	local manager = Manager.new(player, businessModel)
-
-	-- главный тик
-	task.spawn(function()
-		while manager.alive do
-			manager:_tick()
-			task.wait(0.2)
-		end
-	end)
-
+	ActiveBusinesses[player] = state
 	return {
 		Stop = function()
-			manager:Stop()
-		end
+			state.active = false
+			ActiveBusinesses[player] = nil
+			if state.currentAtRegister then
+				state.currentAtRegister:Destroy()
+			end
+			for _, data in pairs(state.clients) do
+				if data.model and data.model.Parent then
+					data.model:Destroy()
+				end
+			end
+		end,
 	}
 end
+
+function StartClientSystem.Stop(player)
+	local state = ActiveBusinesses[player]
+	if not state then
+		return
+	end
+	state.active = false
+	ActiveBusinesses[player] = nil
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	StartClientSystem.Stop(player)
+end)
 
 return StartClientSystem

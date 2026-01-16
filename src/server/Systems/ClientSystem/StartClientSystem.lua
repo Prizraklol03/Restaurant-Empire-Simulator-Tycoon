@@ -51,12 +51,13 @@ local function logSpotNames(spots)
 end
 
 local function logOccupancy(state)
-	local parts = {}
+	local parts = table.create(#state.spotOccupant)
 	for index = 1, #state.spotOccupant do
 		local clientId = state.spotOccupant[index]
-		parts[index] = tostring(clientId or "nil")
+		parts[index] = string.format("%d:%s", index, tostring(clientId or "nil"))
 	end
-	print(string.format("[Occupancy] player=%s spots=%s", state.player.UserId, table.concat(parts, ",")))
+	print(string.format("[Occupancy] player=%s spots=%s", state.player.UserId, table.concat(parts, " ")))
+	print(string.format("[RegisterState] currentAtRegister=%s", tostring(state.currentAtRegister)))
 end
 
 local function countQueue(state)

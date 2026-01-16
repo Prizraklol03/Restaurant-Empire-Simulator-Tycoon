@@ -50,7 +50,11 @@ function RemoteHandlers.Bind()
 			return nil
 		end
 
-		return getSafeSave(player)
+		local profile = getSafeSave(player)
+		if not profile then
+			profile = SaveService.Load(player)
+		end
+		return profile
 	end
 
 	getBusinessStats.OnServerInvoke = function(player)

@@ -6,12 +6,13 @@ local Net = require(ReplicatedStorage.Shared.Net)
 local GetProfile = Net.GetRemoteFunction("GetProfile")
 
 local profile
-for _ = 1, 10 do
+for attempt = 1, 3 do
 	profile = GetProfile:InvokeServer()
 	if profile ~= nil then
 		break
 	end
-	task.wait(0.4)
+	warn(("[CLIENT] GetProfile returned nil, retry %d/3"):format(attempt))
+	task.wait(0.5)
 end
 
 print("[CLIENT] My profile:", profile)

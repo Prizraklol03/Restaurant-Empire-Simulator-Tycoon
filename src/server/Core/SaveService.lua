@@ -157,12 +157,22 @@ function SaveService.Init()
 end
 
 function SaveService.Load(player)
-	local profile = loadFromStore(player) or createDefaultProfile()
+	local profile = createDefaultProfile()
 	Profiles[player] = profile
 
-	for _, callback in ipairs(profileLoadedCallbacks) do
-		callback(player, profile)
-	end
+	task.spawn(function()
+		local loaded = loadFromStore(player)
+		if loaded then
+			local migrated = migrateProfile(loaded)
+			Profiles[player] = migrated
+
+			for _, callback in ipairs(profileLoadedCallbacks) do
+				callback(player, migrated)
+			end
+		else
+			warn("[SaveService] Using default profile for", player.UserId)
+		end
+	end)
 
 	return profile
 end

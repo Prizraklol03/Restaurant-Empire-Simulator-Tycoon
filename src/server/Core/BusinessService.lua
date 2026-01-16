@@ -11,6 +11,16 @@ local BusinessService = {}
 local businessesFolder
 local activeBusinesses = {}
 
+local function getCFAndSize(inst)
+	if inst:IsA("Model") then
+		return inst:GetBoundingBox()
+	elseif inst:IsA("BasePart") then
+		return inst.CFrame, inst.Size
+	else
+		error(("[BusinessService] Plot must be Model or BasePart, got %s"):format(inst.ClassName))
+	end
+end
+
 local function getBusinessesFolder()
 	if businessesFolder and businessesFolder.Parent then
 		return businessesFolder
@@ -88,7 +98,7 @@ function BusinessService.CreateBusinessForPlayer(player)
 	kiosk:SetAttribute("OwnerUserId", player.UserId)
 	kiosk.Parent = businessesRoot
 
-	local plotCf, plotSize = plot:GetBoundingBox()
+	local plotCf, plotSize = getCFAndSize(plot)
 	local kioskCf, kioskSize = kiosk:GetBoundingBox()
 	local plotTopY = plotCf.Position.Y + (plotSize.Y / 2)
 	local kioskHalfY = kioskSize.Y / 2
@@ -105,7 +115,8 @@ function BusinessService.CreateBusinessForPlayer(player)
 		end
 	end
 
-	print(("[BusinessSpawn] plot=%s plotTopY=%.2f kioskSizeY=%.2f targetY=%.2f"):format(plot.Name, plotTopY, kioskSize.Y, targetY))
+	print(("[BusinessSpawn] plot=%s class=%s plotTopY=%.2f plotSizeY=%.2f kioskSizeY=%.2f targetY=%.2f")
+		:format(plot.Name, plot.ClassName, plotTopY, plotSize.Y, kioskSize.Y, targetY))
 	kiosk:PivotTo(targetCf)
 
 	local clientsFolder = Instance.new("Folder")

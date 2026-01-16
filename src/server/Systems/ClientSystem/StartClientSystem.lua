@@ -4,6 +4,7 @@
 local Players = game:GetService("Players")
 local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local PhysicsService = game:GetService("PhysicsService")
 
 local Config = require(game.ServerScriptService.Core.Config)
 local PlayerService = require(game.ServerScriptService.Core.PlayerService)
@@ -24,6 +25,34 @@ local Active = {}
 
 local SPAWN_MIN = 3
 local SPAWN_MAX = 6
+local COLLISION_GROUP = "NPC"
+local collisionReady = false
+
+local function ensureCollisionGroup()
+	if collisionReady then
+		return
+	end
+
+	local ok = pcall(function()
+		PhysicsService:CreateCollisionGroup(COLLISION_GROUP)
+	end)
+
+	pcall(function()
+		PhysicsService:CollisionGroupSetCollidable(COLLISION_GROUP, COLLISION_GROUP, false)
+	end)
+
+	collisionReady = true
+end
+
+local function applyNpcCollision(model)
+	ensureCollisionGroup()
+	for _, descendant in ipairs(model:GetDescendants()) do
+		if descendant:IsA("BasePart") then
+			descendant.CanCollide = false
+			PhysicsService:SetPartCollisionGroup(descendant, COLLISION_GROUP)
+		end
+	end
+end
 
 local function getSpotPosition(spot)
 	if not spot then
@@ -44,6 +73,24 @@ local function logSpotNames(spots)
 	return table.concat(names, ",")
 end
 
+local function logOccupancy(state)
+	local parts = {}
+	for index, clientId in ipairs(state.spotOccupant) do
+		parts[index] = tostring(clientId or "nil")
+	end
+	print(string.format("[Occupancy] player=%s spots=%s", state.player.UserId, table.concat(parts, ",")))
+end
+
+local function countQueue(state)
+	local count = 0
+	for _, clientId in ipairs(state.spotOccupant) do
+		if clientId then
+			count += 1
+		end
+	end
+	return count
+end
+
 local function updateBusinessStats(state)
 	local now = os.clock()
 	if now - (state.lastStatsSent or 0) < 1 then
@@ -55,7 +102,7 @@ local function updateBusinessStats(state)
 		v = 1,
 		money = PlayerService.GetMoney(state.player),
 		servedCount = state.servedCount,
-		queueSize = #state.queueOrder,
+		queueSize = countQueue(state),
 		location = "Kiosk",
 	})
 end
@@ -64,29 +111,75 @@ local function sendCashRegister(state, payload)
 	UpdateCashRegisterUI:FireClient(state.player, payload)
 end
 
-local function assignQueueSpots(state)
-	for index, clientId in ipairs(state.queueOrder) do
-		local client = state.clients[clientId]
-		local spot = state.queueSpots[index]
-		if client and spot then
-			if client.spotIndex ~= index then
-				client.spotIndex = index
+local function getClientRoot(model)
+	return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+end
+
+local function assignClientToSpot(state, clientId, spotIndex)
+	if state.spotOccupant[spotIndex] then
+		warn(string.format("[QueueAssign] spot %d already occupied", spotIndex))
+		return
+	end
+
+	local client = state.clients[clientId]
+	if not client or not client.model then
+		return
+	end
+
+	state.spotOccupant[spotIndex] = clientId
+	state.clientSpotIndex[clientId] = spotIndex
+
+	local pos = getSpotPosition(state.queueSpots[spotIndex])
+	if not pos then
+		return
+	end
+
+	client.atSpot = false
+	print(string.format("[QueueAssign] clientId=%s spot=%d", clientId, spotIndex))
+	local reached = ClientAI.MoveTo(client.model, pos, 6)
+	client.atSpot = reached
+end
+
+local function shiftQueueForward(state)
+	for index = 1, #state.queueSpots - 1 do
+		if state.spotOccupant[index] == nil and state.spotOccupant[index + 1] ~= nil then
+			local clientId = state.spotOccupant[index + 1]
+			state.spotOccupant[index] = clientId
+			state.spotOccupant[index + 1] = nil
+			state.clientSpotIndex[clientId] = index
+
+			local client = state.clients[clientId]
+			if client and client.model then
 				client.atSpot = false
-				local pos = getSpotPosition(spot)
-				if pos and client.model then
-					print(string.format("[Queue] player=%s clientId=%s spotIndex=%d", state.player.UserId, clientId, index))
-					ClientAI.MoveTo(client.model, pos, 6)
-					client.atSpot = true
+				local pos = getSpotPosition(state.queueSpots[index])
+				if pos then
+					print(string.format("[QueueShift] clientId=%s %d->%d", clientId, index + 1, index))
+					local reached = ClientAI.MoveTo(client.model, pos, 5)
+					client.atSpot = reached
 				end
 			end
 		end
 	end
+
+	logOccupancy(state)
 end
 
 local function spawnClient(state)
 	local template = ServerStorage:FindFirstChild("ClientTemplate")
 	if not template then
 		warn("[ClientSystem] ClientTemplate missing")
+		return
+	end
+
+	local freeSpot = nil
+	for index = #state.queueSpots, 1, -1 do
+		if state.spotOccupant[index] == nil then
+			freeSpot = index
+			break
+		end
+	end
+
+	if not freeSpot then
 		return
 	end
 
@@ -101,6 +194,8 @@ local function spawnClient(state)
 		model:PivotTo(state.spawnPoint.CFrame)
 	end
 
+	applyNpcCollision(model)
+
 	state.clients[clientId] = {
 		model = model,
 		state = "Queue",
@@ -108,18 +203,40 @@ local function spawnClient(state)
 		atSpot = false,
 	}
 
-	table.insert(state.queueOrder, clientId)
-	print(string.format("[Spawn] player=%s clientId=%s queueSize=%d/%d", state.player.UserId, clientId, #state.queueOrder, #state.queueSpots))
-	assignQueueSpots(state)
+	print(string.format("[Spawn] player=%s clientId=%s queueSize=%d/%d", state.player.UserId, clientId, countQueue(state), #state.queueSpots))
+	assignClientToSpot(state, clientId, freeSpot)
+	logOccupancy(state)
 	updateBusinessStats(state)
 end
 
-local function moveToRegisterIfReady(state)
+local function waitSpotFreed(state, clientId, spotIndex)
+	local client = state.clients[clientId]
+	local spot = state.queueSpots[spotIndex]
+	if not client or not client.model or not spot then
+		return
+	end
+
+	local pos = getSpotPosition(spot)
+	local root = getClientRoot(client.model)
+	if not pos or not root then
+		return
+	end
+
+	local deadline = os.clock() + 5
+	while os.clock() < deadline do
+		if (root.Position - pos).Magnitude > 4 then
+			return
+		end
+		task.wait(0.1)
+	end
+end
+
+local function promoteToRegister(state)
 	if state.currentAtRegister then
 		return
 	end
 
-	local frontId = state.queueOrder[1]
+	local frontId = state.spotOccupant[1]
 	if not frontId then
 		return
 	end
@@ -129,19 +246,19 @@ local function moveToRegisterIfReady(state)
 		return
 	end
 
-	table.remove(state.queueOrder, 1)
 	state.currentAtRegister = frontId
 	frontClient.state = "Register"
 	frontClient.atSpot = false
 
-	assignQueueSpots(state)
-
 	local pos = getSpotPosition(state.orderPoint)
 	if pos and frontClient.model then
-		print(string.format("[Register] player=%s clientId=%s moving to register", state.player.UserId, frontId))
+		print(string.format("[PromoteToRegister] clientId=%s", frontId))
 		ClientAI.MoveTo(frontClient.model, pos, 8)
-		frontClient.atSpot = true
-		print(string.format("[Register] player=%s clientId=%s reached register", state.player.UserId, frontId))
+		waitSpotFreed(state, frontId, 1)
+		state.spotOccupant[1] = nil
+		state.clientSpotIndex[frontId] = nil
+		print(string.format("[PromoteToRegister] clientId=%s freed Spot_1", frontId))
+		shiftQueueForward(state)
 	end
 end
 
@@ -322,7 +439,6 @@ local function bindPrompts(state)
 			if state.currentOrder then
 				if state.currentOrder.ready then
 					completeOrder(state)
-					moveToRegisterIfReady(state)
 					return
 				end
 				warn("[TakeOrder] order already exists")
@@ -350,7 +466,6 @@ local function bindPrompts(state)
 				return
 			end
 			completeOrder(state)
-			moveToRegisterIfReady(state)
 		end)
 	end
 
@@ -376,17 +491,16 @@ local function bindPrompts(state)
 end
 
 local function update(state)
-	if os.clock() >= state.nextSpawnAt and #state.queueOrder < #state.queueSpots then
+	if os.clock() >= state.nextSpawnAt and countQueue(state) < #state.queueSpots then
 		spawnClient(state)
 		state.nextSpawnAt = os.clock() + math.random(SPAWN_MIN, SPAWN_MAX)
 	end
 
-	moveToRegisterIfReady(state)
+	promoteToRegister(state)
 
 	local order = state.currentOrder
 	if order and os.clock() > order.deadlineAt and not order.ready then
 		failOrder(state, "timeout")
-		moveToRegisterIfReady(state)
 	end
 end
 
@@ -438,7 +552,8 @@ function StartClientSystem.StartForPlayer(player, business)
 		endPoint = business.endPoint,
 		orderPoint = business.orderPoint,
 		queueSpots = sortedSpots,
-		queueOrder = {},
+		spotOccupant = table.create(#sortedSpots, nil),
+		clientSpotIndex = {},
 		clients = {},
 		currentAtRegister = nil,
 		currentOrder = nil,
@@ -454,7 +569,6 @@ function StartClientSystem.StartForPlayer(player, business)
 	}
 
 	bindPrompts(state)
-
 	Active[player] = state
 
 	state.loop = task.spawn(function()
@@ -475,10 +589,6 @@ function StartClientSystem.StopForPlayer(player)
 
 	state.active = false
 	Active[player] = nil
-
-	if state.loop then
-		-- loop exits on active=false
-	end
 
 	for _, client in pairs(state.clients) do
 		if client.model and client.model.Parent then

@@ -51,8 +51,8 @@ local function logSpotNames(spots)
 end
 
 local function logOccupancy(state)
-	local parts = table.create(#state.spotOccupant)
-	for index = 1, #state.spotOccupant do
+	local parts = table.create(state.numSpots)
+	for index = 1, state.numSpots do
 		local clientId = state.spotOccupant[index]
 		parts[index] = string.format("%d:%s", index, tostring(clientId or "nil"))
 	end
@@ -62,8 +62,8 @@ end
 
 local function countQueue(state)
 	local count = 0
-	for index = 1, #state.spotOccupant do
-		if state.spotOccupant[index] then
+	for index = 1, state.numSpots do
+		if state.spotOccupant[index] ~= nil then
 			count += 1
 		end
 	end
@@ -164,7 +164,7 @@ local function assignClientToSpot(state, clientId, spotIndex)
 end
 
 local function shiftQueueForward(state)
-	for index = 1, #state.queueSpots - 1 do
+	for index = 1, state.numSpots - 1 do
 		if state.spotOccupant[index] == nil and state.spotOccupant[index + 1] ~= nil then
 			local clientId = state.spotOccupant[index + 1]
 			state.spotOccupant[index] = clientId
@@ -212,7 +212,7 @@ local function spawnClient(state)
 	end
 
 	local freeSpot = nil
-	for index = 1, #state.queueSpots do
+	for index = 1, state.numSpots do
 		if state.spotOccupant[index] == nil then
 			freeSpot = index
 			break
@@ -600,6 +600,7 @@ function StartClientSystem.StartForPlayer(player, business)
 		endPoint = business.endPoint,
 		orderPoint = business.orderPoint,
 		queueSpots = sortedSpots,
+		numSpots = #sortedSpots,
 		spotOccupant = table.create(#sortedSpots, nil),
 		clientSpotIndex = {},
 		clients = {},

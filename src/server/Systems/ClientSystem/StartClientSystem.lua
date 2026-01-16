@@ -25,6 +25,12 @@ local Active = {}
 local SPAWN_MIN = 3
 local SPAWN_MAX = 6
 
+local function planarDistance(a, b)
+	local dx = a.X - b.X
+	local dz = a.Z - b.Z
+	return math.sqrt(dx * dx + dz * dz)
+end
+
 local function getSpotPosition(spot)
 	if not spot then
 		return nil
@@ -46,7 +52,8 @@ end
 
 local function logOccupancy(state)
 	local parts = {}
-	for index, clientId in ipairs(state.spotOccupant) do
+	for index = 1, #state.spotOccupant do
+		local clientId = state.spotOccupant[index]
 		parts[index] = tostring(clientId or "nil")
 	end
 	print(string.format("[Occupancy] player=%s spots=%s", state.player.UserId, table.concat(parts, ",")))
@@ -54,8 +61,8 @@ end
 
 local function countQueue(state)
 	local count = 0
-	for _, clientId in ipairs(state.spotOccupant) do
-		if clientId then
+	for index = 1, #state.spotOccupant do
+		if state.spotOccupant[index] then
 			count += 1
 		end
 	end
@@ -97,11 +104,12 @@ local function moveToAndConfirm(model, targetPos, radius, timeout)
 		return false
 	end
 
-	humanoid:MoveTo(targetPos)
+	local safeTarget = Vector3.new(targetPos.X, root.Position.Y, targetPos.Z)
+	humanoid:MoveTo(safeTarget)
 
 	local deadline = os.clock() + timeout
 	while os.clock() < deadline do
-		if (root.Position - targetPos).Magnitude <= radius then
+		if planarDistance(root.Position, safeTarget) <= radius then
 			return true
 		end
 		task.wait(0.15)
@@ -273,16 +281,21 @@ local function promoteToRegister(state)
 		print(string.format("[PromoteToRegister] clientId=%s", frontId))
 		frontClient.moveToken += 1
 		local token = frontClient.moveToken
-		moveToAndConfirm(frontClient.model, pos, 2.0, 8)
+		local reachedOrder = moveToAndConfirm(frontClient.model, pos, 2.0, 8)
 		if token ~= frontClient.moveToken then
 			return
 		end
 
-		if (root.Position - spotPos).Magnitude > 3.5 then
+		if reachedOrder then
 			state.spotOccupant[1] = nil
 			state.clientSpotIndex[frontId] = nil
-			print(string.format("[PromoteToRegister] clientId=%s freed Spot_1", frontId))
+			print("[PromoteToRegister] reached orderPoint, freed Spot_1")
+			print("[HOWTO] Клиент у кассы. Нажми TakeOrder на CashRegister.")
 			shiftQueueForward(state)
+		else
+			print("[PromoteToRegister] failed reach orderPoint, will retry")
+			state.currentAtRegister = nil
+			frontClient.state = "Queue"
 		end
 	end
 end
@@ -327,7 +340,7 @@ local function createOrder(state)
 	}
 
 	print(string.format("[Order] created player=%s clientId=%s orderId=%s", state.player.UserId, clientId, order.id))
-	print("[HOWTO] Нажми GRILL/DRINK чтобы приготовить")
+	print(string.format("[HOWTO] Заказ создан: station=%s. Нажми %s.", order.stationType, order.stationType))
 
 	sendCashRegister(state, {
 		v = 1,
@@ -440,7 +453,7 @@ local function startCooking(state, stationType)
 		order.ready = true
 		order.state = "READY"
 		print(string.format("[Cook] ready player=%s orderId=%s", state.player.UserId, order.orderId))
-		print("[HOWTO] Нажми кассу чтобы отдать")
+		print("[HOWTO] Блюдо готово. Нажми TakeOrder на CashRegister чтобы отдать/получить оплату.")
 
 		sendCashRegister(state, {
 			v = 1,

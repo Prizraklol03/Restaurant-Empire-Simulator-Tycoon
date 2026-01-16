@@ -643,10 +643,9 @@ function Config.CanSpawnClient(level, currentQueueSize)
 end
 
 function Config.GetFinalCookTimeMultiplier(params)
-	return
-		(params.employee or 1.0)
-		*	(params.station or 1.0)
-		*	(params.upgrade or 1.0)
+	return (params.employee or 1.0)
+		* (params.station or 1.0)
+		* (params.upgrade or 1.0)
 end
 
 function Config.GetEmployeeSalary(role, rarity)

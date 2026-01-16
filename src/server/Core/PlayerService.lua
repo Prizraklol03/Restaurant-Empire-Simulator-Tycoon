@@ -167,6 +167,11 @@ function PlayerService.GetSave(player)
 	return getSave(player)
 end
 
+function PlayerService.GetProfile(player)
+	-- ТОЛЬКО ДЛЯ READ-ONLY
+	return SaveService.GetProfile(player)
+end
+
 ----------------------------------------------------
 -- VALIDATION / DEBUG
 ----------------------------------------------------

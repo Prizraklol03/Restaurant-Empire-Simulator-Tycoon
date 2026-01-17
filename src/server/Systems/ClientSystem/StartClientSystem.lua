@@ -123,31 +123,6 @@ local function setStationPrompts(state, stationType, cookTime)
 	end
 end
 
-local function moveClientToEndAndDestroyAsync(state, clientModel)
-	if not clientModel then
-		return
-	end
-	local pos = getSpotPosition(state.endPoint)
-	if not pos then
-		clientModel:Destroy()
-		return
-	end
-	task.spawn(function()
-		moveToAndConfirm(clientModel, pos, 2.0, 8)
-		if clientModel and clientModel.Parent then
-			clientModel:Destroy()
-		end
-	end)
-end
-
-local function resetInteraction(state)
-	state.currentOrder = nil
-	state.currentAtRegister = nil
-	state.registerWaitStartAt = nil
-	setCashPrompt(state, "DISABLED")
-	setStationPrompts(state, nil, nil)
-end
-
 local function getClientRoot(model)
 	return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
 end
@@ -175,6 +150,50 @@ local function moveToAndConfirm(model, targetPos, radius, timeout)
 	end
 
 	return false
+end
+
+local function moveClientToEndAndDestroyAsync(state, clientModel)
+	if not clientModel then
+		return
+	end
+	local pos = getSpotPosition(state.endPoint)
+	if not pos then
+		clientModel:Destroy()
+		return
+	end
+	print(string.format("[ExitAsync] moving client model=%s", clientModel.Name))
+	task.spawn(function()
+		moveToAndConfirm(clientModel, pos, 2.0, 8)
+		if clientModel and clientModel.Parent then
+			clientModel:Destroy()
+			print(string.format("[ExitAsync] destroyed model=%s", clientModel.Name))
+		end
+	end)
+end
+
+local function resetInteraction(state)
+	state.currentOrder = nil
+	state.currentAtRegister = nil
+	state.registerWaitStartAt = nil
+	setCashPrompt(state, "DISABLED")
+	setStationPrompts(state, nil, nil)
+end
+
+local function isOrderPointClear(state, radius)
+	local pos = getSpotPosition(state.orderPoint)
+	if not pos then
+		return true
+	end
+	radius = radius or 4.0
+	for _, model in ipairs(state.clientsFolder:GetChildren()) do
+		if model:IsA("Model") and model:GetAttribute("OwnerUserId") == state.player.UserId then
+			local root = getClientRoot(model)
+			if root and planarDistance(root.Position, pos) <= radius then
+				return false
+			end
+		end
+	end
+	return true
 end
 
 local function assignClientToSpot(state, clientId, spotIndex)
@@ -377,6 +396,10 @@ local function promoteToRegister(state)
 			state._lastPromoteDebug = now
 			print(string.format("[PromoteSkip] frontId=%s distToSpot1=%.2f", tostring(frontId), planarDistance(root.Position, spotPos)))
 		end
+		return
+	end
+
+	if not isOrderPointClear(state, 4.0) then
 		return
 	end
 

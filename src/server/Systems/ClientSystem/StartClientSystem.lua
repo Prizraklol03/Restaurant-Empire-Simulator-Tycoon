@@ -165,7 +165,6 @@ local function computePlannedOrder(state)
 		menuLevel = 1,
 		stationLevels = PlayerService.GetStationLevels(state.player),
 		unlockedFoods = PlayerService.GetSave(state.player).Business.UnlockedFoods,
-		maxItems = Config.Customers.KioskSingleItem and 1 or nil,
 	})
 
 	local baseCookSum = 0

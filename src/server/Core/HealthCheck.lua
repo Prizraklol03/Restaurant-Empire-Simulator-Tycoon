@@ -159,7 +159,6 @@ function HealthCheck.RunStageAudit()
 		{ id = "C6", name = "Deadline uses order.waitTime", pass = true, reason = "OrderService computes deadlineAt" },
 		{ id = "C7", name = "MaxOrderProcessTime not primary", pass = true, reason = "StartClientSystem uses order.deadlineAt" },
 		{ id = "D9", name = "OrderGenerator uses FoodConfig availability", pass = true, reason = "FoodConfig filtering used" },
-		{ id = "D10", name = "Kiosk single item mode", pass = true, reason = "Config.Customers.KioskSingleItem" },
 		{ id = "E11", name = "Template diagnostics", pass = true, reason = "HealthCheck validates kiosk paths" },
 	}
 

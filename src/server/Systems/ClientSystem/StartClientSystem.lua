@@ -102,6 +102,22 @@ local orderHasRemainingForStation
 local pickNextFoodForStation
 local getUnitFinalCookTime
 
+local function ensureBoolMap(t)
+	if type(t) ~= "table" then
+		return {}
+	end
+	if #t > 0 then
+		local map = {}
+		for _, id in ipairs(t) do
+			if type(id) == "string" and id ~= "" then
+				map[id] = true
+			end
+		end
+		return map
+	end
+	return t
+end
+
 local function setCashPrompt(state, mode)
 	local cashPrompt = state.cashPrompt
 	if not cashPrompt then
@@ -275,13 +291,61 @@ getUnitFinalCookTime = function(player, foodId)
 	return (food.BaseCookTime or 0) * mult
 end
 
+local function debugMenuSnapshotOnce(state)
+	if not Config.Server.DebugMode then
+		return
+	end
+	if state._menuSnapshotLogged then
+		return
+	end
+	state._menuSnapshotLogged = true
+
+	local stationLevels = PlayerService.GetStationLevels(state.player) or {}
+	local unlocked = ensureBoolMap(PlayerService.GetUnlockedFoods(state.player))
+	local enabled = ensureBoolMap(PlayerService.GetEnabledFoods(state.player))
+
+	local function keys(t)
+		local out = {}
+		for k, v in pairs(t) do
+			if v == true or type(v) == "number" then
+				table.insert(out, tostring(k) .. "=" .. tostring(v))
+			end
+		end
+		table.sort(out)
+		return table.concat(out, ",")
+	end
+
+	print("[MenuSnapshot] stationLevels=" .. keys(stationLevels))
+	print("[MenuSnapshot] unlocked=" .. keys(unlocked))
+	print("[MenuSnapshot] enabled=" .. keys(enabled))
+
+	local categories = FoodConfig.GetCategories()
+	local menuLevel = 1
+	for categoryId in pairs(categories) do
+		local foods = FoodConfig.GetAvailableFoodsByCategory(categoryId, menuLevel, stationLevels, unlocked)
+		local candidates = {}
+		for _, food in ipairs(foods) do
+			if enabled[food.Id] == true then
+				table.insert(candidates, food.Id .. "(" .. tostring(food.Station) .. ")")
+			end
+		end
+		table.sort(candidates)
+		print(string.format("[MenuSnapshot] category=%s candidates=%d [%s]", categoryId, #candidates, table.concat(candidates, ",")))
+	end
+
+	local cola = FoodConfig.GetFoodById("Cola")
+	print("[MenuSnapshot] colaExists=" .. tostring(cola ~= nil) .. " colaStation=" .. tostring(cola and cola.Station))
+end
+
 local function computePlannedOrder(state)
 	local stationLevels = PlayerService.GetStationLevels(state.player)
+	local unlockedFoods = ensureBoolMap(PlayerService.GetUnlockedFoods(state.player))
+	local enabledFoods = ensureBoolMap(PlayerService.GetEnabledFoods(state.player))
 	local items = OrderGenerator.Generate({
 		menuLevel = 1,
 		stationLevels = stationLevels,
-		unlockedFoods = PlayerService.GetUnlockedFoods(state.player),
-		enabledFoods = PlayerService.GetEnabledFoods(state.player),
+		unlockedFoods = unlockedFoods,
+		enabledFoods = enabledFoods,
 	})
 
 	local baseCookSum = 0
@@ -1047,6 +1111,7 @@ function StartClientSystem.StartForPlayer(player, business)
 	setCashPrompt(state, "DISABLED")
 	setStationPrompts(state)
 	Active[player] = state
+	debugMenuSnapshotOnce(state)
 
 	state.loop = task.spawn(function()
 		while state.active do

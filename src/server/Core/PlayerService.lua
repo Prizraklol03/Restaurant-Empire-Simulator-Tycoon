@@ -105,12 +105,34 @@ function PlayerService.UpgradeStation(player, stationType)
 end
 
 function PlayerService.GetStationLevels(player)
-	local business = getBusiness(getSave(player))
+	local save = getSave(player)
+	local business = save.Business
 	local result = {}
 
-	for stationType, data in pairs(business.Stations) do
-		result[stationType] = data.Level
+	local legacyStations = business and business.Stations or {}
+	local newStations = save.stations or {}
+
+	for stationType, data in pairs(legacyStations) do
+		local level = tonumber(data.Level) or 0
+		result[stationType] = math.max(0, level)
 	end
+
+	for stationType, data in pairs(newStations) do
+		if result[stationType] == nil then
+			local level = tonumber(data.level) or 0
+			result[stationType] = math.max(0, level)
+		end
+	end
+
+	if next(result) == nil then
+		return {
+			GRILL = 1,
+			DRINK = 1,
+		}
+	end
+
+	result.GRILL = result.GRILL or 0
+	result.DRINK = result.DRINK or 0
 
 	return result
 end

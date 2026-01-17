@@ -28,8 +28,9 @@
 		<Item class="LocalScript" referent="RBX036E898786DC4D67AF23E19170F29F23">
 			<Properties>
 				<ProtectedString name="Source"><![CDATA[local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Net = require(ReplicatedStorage.Shared.Net)
 
-local GetGameState = ReplicatedStorage.Remotes.Functions.GetGameState
+local GetGameState = Net.GetRemoteFunction("GetGameState")
 
 local gui = script.Parent
 local moneyLabel = gui.MoneyLabel

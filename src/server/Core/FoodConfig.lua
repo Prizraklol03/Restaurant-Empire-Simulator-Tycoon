@@ -113,6 +113,25 @@ FoodConfig.Foods = {
 		Description = "Fresh coffee",
 	},
 
+	Cola = {
+		Id = "Cola",
+		Name = "Cola",
+		Category = "Drink",
+
+		MenuLevel = 1,
+		Station = "DRINK",
+		RequiredStationLevel = 1,
+
+		BasePrice = 13,
+		BaseCookTime = 3,
+
+		OrderChance = 0.85,
+		MaxPerOrder = 2,
+
+		Icon = "rbxassetid://4567890124",
+		Description = "Chilled cola",
+	},
+
 	Tea = {
 		Id = "Tea",
 		Name = "Tea",

@@ -1,16 +1,14 @@
 --====================================================
 -- SaveService.lua
 -- v2.0
--- Единственный владелец SaveData
+-- DataStore-backed profile storage
 --====================================================
 
 local Players = game:GetService("Players")
-local ServerScriptService = game:GetService("ServerScriptService")
+local DataStoreService = game:GetService("DataStoreService")
 
--- ProfileService (обязательно положи ModuleScript)
-local ProfileService = require(ServerScriptService.Core.ProfileService)
-
-local Config = require(ServerScriptService.Core.Config)
+local Config = require(game.ServerScriptService.Core.Config)
+local FoodConfig = require(game.ServerScriptService.Core.FoodConfig)
 
 local SaveService = {}
 
@@ -18,41 +16,248 @@ local SaveService = {}
 -- CONSTANTS
 ----------------------------------------------------
 
-local PROFILE_STORE_NAME = "RestaurantEmpire_Save_v2"
-local SAVE_VERSION = "2.0"
-
-----------------------------------------------------
--- PROFILE STORE
-----------------------------------------------------
-
-local ProfileStore = ProfileService.GetProfileStore(
-	PROFILE_STORE_NAME,
-	{} -- шаблон не используем, создаём вручную
-)
+local PROFILE_STORE = DataStoreService:GetDataStore("Profiles_v2")
+local AUTOSAVE_INTERVAL = 60
 
 ----------------------------------------------------
 -- RUNTIME STATE
 ----------------------------------------------------
 
-local Profiles = {} -- [player] = profile
+local Profiles = {} -- [player] = profile table
+local profileLoadedCallbacks = {}
 
 ----------------------------------------------------
--- DEFAULT SAVE DATA
+-- DEFAULT PROFILE
 ----------------------------------------------------
 
-local function createDefaultSave()
-	return {
-		Version = SAVE_VERSION,
+local DEFAULT_START_FOODS = { "Burger", "Cola" }
 
-		Money = Config.Player.StartMoney or 0,
-		BusinessLevel = Config.Player.StartBusinessLevel or 1,
+local function normalizeFoodsMap(value)
+	local map = {}
+	if type(value) ~= "table" then
+		return map
+	end
+	if #value > 0 then
+		for _, entry in ipairs(value) do
+			if type(entry) == "string" and entry ~= "" then
+				map[entry] = true
+			end
+		end
+		return map
+	end
+	for key, entry in pairs(value) do
+		if entry == true then
+			map[key] = true
+		elseif type(entry) == "number" and entry ~= 0 then
+			map[key] = true
+		elseif type(entry) == "string" and entry == "true" then
+			map[key] = true
+		end
+	end
+	return map
+end
 
+local function syncFoodMaps(profile, topKey, bizKey)
+	profile.Business = profile.Business or {}
+	local topMap = normalizeFoodsMap(profile[topKey])
+	local bizMap = normalizeFoodsMap(profile.Business[bizKey])
+
+	for key in pairs(bizMap) do
+		topMap[key] = true
+	end
+	for key in pairs(topMap) do
+		bizMap[key] = true
+	end
+
+	profile[topKey] = topMap
+	profile.Business[bizKey] = bizMap
+end
+
+local function getStationLevels(profile)
+	local levels = {}
+	local stations = profile.stations or {}
+	local businessStations = profile.Business and profile.Business.Stations or {}
+
+	for stationType, data in pairs(businessStations) do
+		local level = tonumber(data.Level) or 0
+		levels[stationType] = math.max(0, level)
+	end
+
+	for stationType, data in pairs(stations) do
+		if levels[stationType] == nil then
+			local level = tonumber(data.level) or 0
+			levels[stationType] = math.max(0, level)
+		end
+	end
+
+	if next(levels) == nil then
+		levels.GRILL = 1
+		levels.DRINK = 1
+	end
+
+	levels.GRILL = levels.GRILL or 0
+	levels.DRINK = levels.DRINK or 0
+
+	return levels
+end
+
+local function applyStarterFoods(profile)
+	if profile._starterFoodsApplied then
+		return
+	end
+
+	local unlockedTop = normalizeFoodsMap(profile.unlockedFoods)
+	local enabledTop = normalizeFoodsMap(profile.enabledFoods)
+	local unlockedBiz = normalizeFoodsMap(profile.Business and profile.Business.UnlockedFoods)
+	local enabledBiz = normalizeFoodsMap(profile.Business and profile.Business.EnabledFoods)
+
+	local unlocked = {}
+	local enabled = {}
+
+	for key in pairs(unlockedTop) do
+		unlocked[key] = true
+	end
+	for key in pairs(unlockedBiz) do
+		unlocked[key] = true
+	end
+	for key in pairs(enabledTop) do
+		enabled[key] = true
+	end
+	for key in pairs(enabledBiz) do
+		enabled[key] = true
+	end
+
+	local stationLevels = getStationLevels(profile)
+
+	local hadColaUnlocked = unlocked["Cola"] == true
+	local hadColaEnabled = enabled["Cola"] == true
+	local addedAny = false
+
+	for _, food in pairs(FoodConfig.Foods) do
+		local menuLevel = food.MenuLevel or 1
+		local requiredStation = food.RequiredStationLevel or 1
+		local stationLevel = stationLevels[food.Station] or 0
+		if menuLevel <= 1
+			and requiredStation <= stationLevel
+			and (food.Unlock == nil or food.Unlock == false) then
+			if not unlocked[food.Id] then
+				unlocked[food.Id] = true
+				addedAny = true
+			end
+			if not enabled[food.Id] then
+				enabled[food.Id] = true
+				addedAny = true
+			end
+		end
+	end
+
+	profile.unlockedFoods = unlocked
+	profile.enabledFoods = enabled
+	profile.Business = profile.Business or {}
+	profile.Business.UnlockedFoods = unlocked
+	profile.Business.EnabledFoods = enabled
+
+	profile._starterFoodsApplied = true
+
+	if Config.Server.DebugMode and addedAny and not profile._starterFoodsLogged then
+		profile._starterFoodsLogged = true
+		print(string.format(
+			"[StarterFoods] applied, unlockedCola=%s enabledCola=%s",
+			tostring(unlocked["Cola"]),
+			tostring(enabled["Cola"])
+		))
+	end
+end
+
+local function ensureFoodTables(profile)
+	profile.Business = profile.Business or {}
+	profile.Business.UnlockedFoods = profile.Business.UnlockedFoods or {}
+	profile.Business.EnabledFoods = profile.Business.EnabledFoods or {}
+
+	if profile.Business.FoodsInitialized ~= true then
+		local unlockedEmpty = next(profile.Business.UnlockedFoods) == nil
+		local enabledEmpty = next(profile.Business.EnabledFoods) == nil
+		if unlockedEmpty and enabledEmpty then
+			for _, foodId in ipairs(DEFAULT_START_FOODS) do
+				profile.Business.UnlockedFoods[foodId] = true
+				profile.Business.EnabledFoods[foodId] = true
+			end
+		end
+		profile.Business.FoodsInitialized = true
+	end
+
+	if profile.Business.EnabledInitialized ~= true then
+		local enabledEmpty = next(profile.Business.EnabledFoods) == nil
+		if enabledEmpty then
+			for _, foodId in ipairs(DEFAULT_START_FOODS) do
+				if profile.Business.UnlockedFoods[foodId] == true and FoodConfig.GetFoodById(foodId) then
+					profile.Business.EnabledFoods[foodId] = true
+				end
+			end
+
+			if next(profile.Business.EnabledFoods) == nil then
+				for foodId, value in pairs(profile.Business.UnlockedFoods) do
+					if value == true and FoodConfig.GetFoodById(foodId) then
+						profile.Business.EnabledFoods[foodId] = true
+						break
+					end
+				end
+			end
+		end
+
+		if next(profile.Business.EnabledFoods) ~= nil then
+			profile.Business.EnabledInitialized = true
+		end
+	end
+
+	for foodId, value in pairs(profile.Business.EnabledFoods) do
+		if value == true then
+			local food = FoodConfig.GetFoodById(foodId)
+			if not food then
+				profile.Business.EnabledFoods[foodId] = nil
+			elseif food.Unlock and profile.Business.UnlockedFoods[foodId] ~= true then
+				profile.Business.EnabledFoods[foodId] = nil
+			end
+		else
+			profile.Business.EnabledFoods[foodId] = nil
+		end
+	end
+end
+
+local function createDefaultProfile()
+	local unlocked = { "Burger", "Cola" }
+	local unlockedMap = {
+		Burger = true,
+		Cola = true,
+	}
+	local enabledMap = {
+		Burger = true,
+		Cola = true,
+	}
+
+	local profile = {
+		schemaVersion = 2,
+		money = 0,
+		businessLevel = 1,
+		stations = {
+			GRILL = { level = 1 },
+			DRINK = { level = 1 },
+		},
+		unlockedFoods = unlocked,
+		enabledFoods = { "Burger", "Cola" },
+		employees = nil,
+		location = "Kiosk",
+		ServedCount = 0,
+
+		-- Legacy compatibility
+		Version = "2.0",
+		Money = 0,
+		BusinessLevel = 1,
 		Business = {
 			Stations = {
 				GRILL = { Level = 1 },
 				DRINK = { Level = 1 },
 			},
-
 			Upgrades = {
 				ClientFlow = {},
 				Kitchen = {},
@@ -60,118 +265,250 @@ local function createDefaultSave()
 				Staff = {},
 				Future = {},
 			},
-
-			UnlockedFoods = {},
-			Employees = {}, -- на будущее
+			UnlockedFoods = unlockedMap,
+			EnabledFoods = enabledMap,
+			EnabledInitialized = true,
+			FoodsInitialized = true,
+			Employees = {},
 		},
 	}
+
+	ensureFoodTables(profile)
+	syncFoodMaps(profile, "unlockedFoods", "UnlockedFoods")
+	syncFoodMaps(profile, "enabledFoods", "EnabledFoods")
+	return profile
 end
 
 ----------------------------------------------------
--- MIGRATIONS
+-- MIGRATION
 ----------------------------------------------------
 
-local function migrateSave(save)
-	-- если версии нет — считаем как 1.0
-	if not save.Version then
-		save.Version = "1.0"
+local function applyDefaults(profile)
+	local defaults = createDefaultProfile()
+
+	for key, value in pairs(defaults) do
+		if profile[key] == nil then
+			profile[key] = value
+		end
 	end
 
-	-- пример будущей миграции
-	if save.Version == "1.0" then
-		-- здесь можно будет преобразовывать старую структуру
-		save.Version = "2.0"
+	profile.schemaVersion = 2
+	profile.Version = profile.Version or "2.0"
+	profile.location = profile.location or Config.Player.StartLocation or "Kiosk"
+
+	profile.money = profile.money or 0
+	profile.businessLevel = profile.businessLevel or 1
+	profile.ServedCount = profile.ServedCount or 0
+
+	profile.stations = profile.stations or defaults.stations
+	profile.unlockedFoods = profile.unlockedFoods or defaults.unlockedFoods
+	profile.enabledFoods = profile.enabledFoods or defaults.enabledFoods
+
+	profile.Business = profile.Business or defaults.Business
+	profile.Money = profile.Money or profile.money
+	profile.BusinessLevel = profile.BusinessLevel or profile.businessLevel
+	if type(profile.Business.UnlockedFoods) ~= "table" then
+		profile.Business.UnlockedFoods = {}
+	end
+	if type(profile.Business.EnabledFoods) ~= "table" then
+		profile.Business.EnabledFoods = {}
 	end
 
-	-- гарантируем наличие обязательных полей
-	if not save.Business then
-		save.Business = createDefaultSave().Business
+	local canonicalMap = {}
+	for foodId in pairs(FoodConfig.Foods) do
+		canonicalMap[string.lower(foodId)] = foodId
+	end
+	for foodId in pairs(FoodConfig.FoodsPremium) do
+		canonicalMap[string.lower(foodId)] = foodId
 	end
 
-	return save
-end
+	local function normalizeBusinessMap(map)
+		if type(map) ~= "table" then
+			return
+		end
 
-----------------------------------------------------
--- PROFILE LOAD
-----------------------------------------------------
-
-local function loadProfile(player)
-	local profile = ProfileStore:LoadProfileAsync(
-		"Player_" .. player.UserId,
-		"ForceLoad"
-	)
-
-	if not profile then
-		player:Kick("Save load failed. Please rejoin.")
-		return
+		for key, value in pairs(map) do
+			if value == true then
+				local canonical = canonicalMap[string.lower(key)]
+				if canonical and canonical ~= key then
+					map[canonical] = true
+					map[key] = nil
+				end
+			else
+				map[key] = nil
+			end
+		end
 	end
 
-	profile:AddUserId(player.UserId)
-	profile:Reconcile() -- на будущее
+	normalizeBusinessMap(profile.Business.UnlockedFoods)
+	normalizeBusinessMap(profile.Business.EnabledFoods)
 
-	profile.Data = migrateSave(profile.Data or createDefaultSave())
+	for foodId in pairs(profile.Business.EnabledFoods) do
+		if not profile.Business.UnlockedFoods[foodId] then
+			profile.Business.EnabledFoods[foodId] = nil
+		elseif not FoodConfig.GetFoodById(foodId) then
+			profile.Business.EnabledFoods[foodId] = nil
+		end
+	end
 
-	Profiles[player] = profile
-
-	profile:ListenToRelease(function()
-		Profiles[player] = nil
-		player:Kick("Save released.")
-	end)
+	ensureFoodTables(profile)
+	syncFoodMaps(profile, "unlockedFoods", "UnlockedFoods")
+	syncFoodMaps(profile, "enabledFoods", "EnabledFoods")
+	if type(profile.unlockedFoods) == "table" then
+		local normalized = {}
+		local seen = {}
+		for _, key in ipairs(profile.unlockedFoods) do
+			local canonical = canonicalMap[string.lower(key)]
+			if canonical and not seen[canonical] then
+				table.insert(normalized, canonical)
+				seen[canonical] = true
+			end
+		end
+		if #normalized > 0 then
+			profile.unlockedFoods = normalized
+		end
+	end
 
 	return profile
+end
+
+local function migrateProfile(profile)
+	if type(profile) ~= "table" then
+		return createDefaultProfile()
+	end
+
+	local version = tonumber(profile.schemaVersion) or 0
+	if version < 2 then
+		profile.schemaVersion = 2
+	end
+
+	return applyDefaults(profile)
+end
+
+----------------------------------------------------
+-- DATASTORE HELPERS
+----------------------------------------------------
+
+local function getKey(player)
+	return tostring(player.UserId)
+end
+
+local function loadFromStore(player)
+	local key = getKey(player)
+	local ok, data = pcall(PROFILE_STORE.GetAsync, PROFILE_STORE, key)
+	if not ok then
+		warn("[SaveService] Load failed for", key, data)
+		return nil
+	end
+
+	if data == nil then
+		return createDefaultProfile()
+	end
+
+	return migrateProfile(data)
+end
+
+local function saveToStore(player, profile)
+	local key = getKey(player)
+	local ok, err = pcall(PROFILE_STORE.SetAsync, PROFILE_STORE, key, profile)
+	if not ok then
+		warn("[SaveService] Save failed for", key, err)
+		return false
+	end
+
+	return true
 end
 
 ----------------------------------------------------
 -- PUBLIC API
 ----------------------------------------------------
 
+function SaveService.Init()
+	-- optional hook for future init
+end
+
+function SaveService.Load(player)
+	local profile = createDefaultProfile()
+	Profiles[player] = profile
+
+	task.spawn(function()
+		local loaded = loadFromStore(player)
+		if loaded then
+			local migrated = migrateProfile(loaded)
+			applyStarterFoods(migrated)
+			Profiles[player] = migrated
+
+			for _, callback in ipairs(profileLoadedCallbacks) do
+				callback(player, migrated)
+			end
+		else
+			warn("[SaveService] Using default profile for", player.UserId)
+		end
+	end)
+
+	return profile
+end
+
+function SaveService.Save(player)
+	local profile = Profiles[player]
+	if not profile then
+		return false
+	end
+
+	return saveToStore(player, profile)
+end
+
 function SaveService.GetProfile(player)
 	return Profiles[player]
 end
 
 function SaveService.GetSave(player)
+	return Profiles[player]
+end
+
+function SaveService.Update(player, mutatorFn)
 	local profile = Profiles[player]
-	return profile and profile.Data
+	if not profile then
+		profile = SaveService.Load(player)
+	end
+
+	if type(mutatorFn) == "function" then
+		mutatorFn(profile)
+	end
+
+	return profile
+end
+
+function SaveService.OnProfileLoaded(player, callback)
+	if type(player) == "function" and callback == nil then
+		table.insert(profileLoadedCallbacks, player)
+		return
+	end
+
+	if type(callback) == "function" then
+		table.insert(profileLoadedCallbacks, function(loadedPlayer, profile)
+			if loadedPlayer == player then
+				callback(loadedPlayer, profile)
+			end
+		end)
+	end
 end
 
 function SaveService.Release(player)
-	local profile = Profiles[player]
-	if profile then
-		profile:Release()
-	end
+	Profiles[player] = nil
 end
 
 ----------------------------------------------------
--- PLAYER LIFECYCLE
+-- AUTOSAVE
 ----------------------------------------------------
 
-Players.PlayerAdded:Connect(function(player)
-	loadProfile(player)
-end)
-
-Players.PlayerRemoving:Connect(function(player)
-	SaveService.Release(player)
-end)
-
-----------------------------------------------------
--- SHUTDOWN SAFETY
-----------------------------------------------------
-
-game:BindToClose(function()
-	for player, profile in pairs(Profiles) do
-		profile:Release()
+task.spawn(function()
+	while true do
+		task.wait(AUTOSAVE_INTERVAL)
+		for _, player in ipairs(Players:GetPlayers()) do
+			SaveService.Save(player)
+		end
 	end
 end)
-
-----------------------------------------------------
--- DEBUG (OPTIONAL)
-----------------------------------------------------
-
-function SaveService._DebugDump(player)
-	local save = SaveService.GetSave(player)
-	if save then
-		warn("[SaveService] Dump:", save)
-	end
-end
 
 return SaveService

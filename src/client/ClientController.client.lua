@@ -1,16 +1,18 @@
 print("[CLIENT] ClientController started")
 
-
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local GetProfile = ReplicatedStorage.Remotes.Functions.GetProfile
+local Net = require(ReplicatedStorage.Shared.Net)
+
+local GetProfile = Net.GetRemoteFunction("GetProfile")
 
 local profile
-repeat
+for attempt = 1, 3 do
 	profile = GetProfile:InvokeServer()
-	task.wait(0.2)
-until profile ~= nil
+	if profile ~= nil then
+		break
+	end
+	warn(("[CLIENT] GetProfile returned nil, retry %d/3"):format(attempt))
+	task.wait(0.5)
+end
 
 print("[CLIENT] My profile:", profile)
-
-
-local ReplicatedStorage = game:GetService("ReplicatedStorage")

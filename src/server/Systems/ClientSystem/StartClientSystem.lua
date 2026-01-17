@@ -90,6 +90,39 @@ local function sendCashRegister(state, payload)
 	UpdateCashRegisterUI:FireClient(state.player, payload)
 end
 
+local function setCashPrompt(state, mode)
+	local cashPrompt = state.cashPrompt
+	if not cashPrompt then
+		return
+	end
+
+	if mode == "TAKE" then
+		cashPrompt.Enabled = true
+		cashPrompt.ActionText = "Take Order"
+	elseif mode == "GIVE" then
+		cashPrompt.Enabled = true
+		cashPrompt.ActionText = "Give Order"
+	else
+		cashPrompt.Enabled = false
+	end
+end
+
+local function setStationPrompts(state, stationType, cookTime)
+	local holdDuration = cookTime and math.max(0.1, cookTime) or 0
+
+	for _, prompt in ipairs(state.grillPrompts) do
+		prompt.Enabled = stationType == "GRILL"
+		prompt.ActionText = "Cook"
+		prompt.HoldDuration = holdDuration
+	end
+
+	for _, prompt in ipairs(state.drinkPrompts) do
+		prompt.Enabled = stationType == "DRINK"
+		prompt.ActionText = "Cook"
+		prompt.HoldDuration = holdDuration
+	end
+end
+
 local function getClientRoot(model)
 	return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
 end
@@ -276,6 +309,32 @@ local function removeClientFromQueue(state, clientId, reason)
 	shiftQueueForward(state)
 end
 
+local function removeClientAtRegister(state, reason)
+	local clientId = state.currentAtRegister
+	if not clientId then
+		return
+	end
+
+	local client = state.clients[clientId]
+	if client then
+		print(string.format("[RegisterExit] clientId=%s reason=%s", clientId, reason))
+		local pos = getSpotPosition(state.endPoint)
+		if client.model and pos then
+			client.state = "Exit"
+			client.moveToken += 1
+			moveToAndConfirm(client.model, pos, 2.0, 8)
+			client.model:Destroy()
+		end
+		state.clients[clientId] = nil
+	end
+
+	state.currentAtRegister = nil
+	state.registerWaitStartAt = nil
+	setCashPrompt(state, "DISABLED")
+	setStationPrompts(state, nil, nil)
+	updateBusinessStats(state)
+end
+
 local function promoteToRegister(state)
 	if state.currentAtRegister then
 		return
@@ -323,13 +382,17 @@ local function promoteToRegister(state)
 		if reachedOrder then
 			state.spotOccupant[1] = nil
 			state.clientSpotIndex[frontId] = nil
+			state.registerWaitStartAt = os.clock()
 			print("[PromoteToRegister] reached orderPoint, freed Spot_1")
-			print("[HOWTO] Клиент у кассы. Нажми TakeOrder на CashRegister.")
+			print("[HOWTO] Клиент у кассы. Нажми Take Order на CashRegister.")
+			setCashPrompt(state, "TAKE")
+			setStationPrompts(state, nil, nil)
 			shiftQueueForward(state)
 		else
 			print("[PromoteToRegister] failed reach orderPoint, will retry")
 			state.currentAtRegister = nil
 			frontClient.state = "Queue"
+			setCashPrompt(state, "DISABLED")
 		end
 	end
 end
@@ -376,6 +439,8 @@ local function createOrder(state)
 
 	print(string.format("[Order] created player=%s clientId=%s orderId=%s", state.player.UserId, clientId, order.id))
 	print(string.format("[HOWTO] Заказ создан: station=%s. Нажми %s.", order.stationType, order.stationType))
+	setCashPrompt(state, "COOKING")
+	setStationPrompts(state, order.stationType, order.cookTime)
 
 	sendCashRegister(state, {
 		v = 1,
@@ -419,6 +484,9 @@ local function completeOrder(state)
 
 	state.currentOrder = nil
 	state.currentAtRegister = nil
+	state.registerWaitStartAt = nil
+	setCashPrompt(state, "DISABLED")
+	setStationPrompts(state, nil, nil)
 end
 
 local function failOrder(state, reason)
@@ -452,6 +520,9 @@ local function failOrder(state, reason)
 
 	state.currentOrder = nil
 	state.currentAtRegister = nil
+	state.registerWaitStartAt = nil
+	setCashPrompt(state, "DISABLED")
+	setStationPrompts(state, nil, nil)
 	updateBusinessStats(state)
 end
 
@@ -470,81 +541,43 @@ local function startCooking(state, stationType)
 		return
 	end
 
-	order.state = "COOKING"
-	print(string.format("[Cook] start player=%s orderId=%s station=%s", state.player.UserId, order.orderId, stationType))
+	order.ready = true
+	order.state = "READY"
+	print(string.format("[Cook] ready player=%s orderId=%s", state.player.UserId, order.orderId))
+	print("[HOWTO] Блюдо готово. Нажми Give Order на CashRegister.")
+	setStationPrompts(state, nil, nil)
+	setCashPrompt(state, "GIVE")
 
 	sendCashRegister(state, {
 		v = 1,
-		state = "COOKING",
+		state = "READY",
 		orderId = order.orderId,
-		stationType = stationType,
-		cookTime = order.cookTime,
 	})
-
-	task.delay(order.cookTime, function()
-		if state.currentOrder ~= order then
-			return
-		end
-
-		order.ready = true
-		order.state = "READY"
-		print(string.format("[Cook] ready player=%s orderId=%s", state.player.UserId, order.orderId))
-		print("[HOWTO] Блюдо готово. Нажми TakeOrder на CashRegister чтобы отдать/получить оплату.")
-
-		sendCashRegister(state, {
-			v = 1,
-			state = "READY",
-			orderId = order.orderId,
-		})
-	end)
 end
 
 local function bindPrompts(state)
 	local ownerId = state.player.UserId
 
-	local takeOrderPrompt = state.takeOrderPrompt
-	if takeOrderPrompt then
-		takeOrderPrompt.Triggered:Connect(function(triggerPlayer)
-			print("[TakeOrder] trigger", triggerPlayer.Name, "owner", ownerId, "currentAtRegister", state.currentAtRegister, "hasOrder", state.currentOrder ~= nil)
+	local cashPrompt = state.cashPrompt
+	if cashPrompt then
+		cashPrompt.Triggered:Connect(function(triggerPlayer)
 			if triggerPlayer.UserId ~= ownerId then
-				warn("[TakeOrder] not owner")
+				warn("[CashRegister] not owner")
 				return
 			end
 			if not state.currentAtRegister then
-				warn("[TakeOrder] no client at register")
-				return
-			end
-			if state.currentOrder then
-				if state.currentOrder.ready then
-					completeOrder(state)
-					return
-				end
-				warn("[TakeOrder] order already exists")
-				return
-			end
-			createOrder(state)
-		end)
-	else
-		warn("[ClientSystem] TakeOrder prompt missing")
-	end
-
-	local servePrompt = state.servePrompt
-	if servePrompt then
-		servePrompt.Triggered:Connect(function(triggerPlayer)
-			if triggerPlayer.UserId ~= ownerId then
-				warn("[ServeOrder] not owner")
 				return
 			end
 			if not state.currentOrder then
-				warn("[ServeOrder] no order")
+				createOrder(state)
 				return
 			end
-			if not state.currentOrder.ready then
-				warn("[ServeOrder] order not ready")
-				return
+			if state.currentOrder.ready then
+				completeOrder(state)
 			end
-			completeOrder(state)
 		end)
+	else
+		warn("[ClientSystem] CashRegister prompt missing")
 	end
 
 	for _, prompt in ipairs(state.grillPrompts) do
@@ -579,6 +612,13 @@ local function update(state)
 	local patienceMultiplier = 1
 	if PlayerService.GetServedCount(state.player) < 1 then
 		patienceMultiplier = Config.Customers.TutorialPatienceMultiplier or 1
+	end
+
+	if state.currentAtRegister ~= nil and state.currentOrder == nil and state.registerWaitStartAt then
+		if os.clock() - state.registerWaitStartAt > (Config.Customers.MaxWaitTime * patienceMultiplier) then
+			print("[RegisterTimeout] client waited too long for Take Order")
+			removeClientAtRegister(state, "register_timeout")
+		end
 	end
 
 	for index = 1, state.numSpots do
@@ -623,19 +663,7 @@ function StartClientSystem.StartForPlayer(player, business)
 	print(string.format("[ClientSystem] player=%s spots=%d names=%s", player.UserId, #sortedSpots, logSpotNames(sortedSpots)))
 
 	local cashPrompts = business.cashRegisterPrompts or {}
-	local takeOrderPrompt = nil
-	local servePrompt = nil
-	for _, prompt in ipairs(cashPrompts) do
-		if prompt.Name == "TakeOrder" then
-			takeOrderPrompt = prompt
-		elseif prompt.Name == "ServeOrder" or prompt.Name == "PayOrder" then
-			servePrompt = prompt
-		end
-	end
-
-	if not takeOrderPrompt then
-		takeOrderPrompt = cashPrompts[1]
-	end
+	local cashPrompt = cashPrompts[1]
 
 	local state = {
 		player = player,
@@ -657,12 +685,14 @@ function StartClientSystem.StartForPlayer(player, business)
 		nextSpawnAt = os.clock() + math.random(SPAWN_MIN, SPAWN_MAX),
 		grillPrompts = business.grillPrompts or {},
 		drinkPrompts = business.drinkPrompts or {},
-		takeOrderPrompt = takeOrderPrompt,
-		servePrompt = servePrompt,
+		cashPrompt = cashPrompt,
+		registerWaitStartAt = nil,
 		active = true,
 	}
 
 	bindPrompts(state)
+	setCashPrompt(state, "DISABLED")
+	setStationPrompts(state, nil, nil)
 	Active[player] = state
 
 	state.loop = task.spawn(function()

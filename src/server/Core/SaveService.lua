@@ -8,6 +8,7 @@ local Players = game:GetService("Players")
 local DataStoreService = game:GetService("DataStoreService")
 
 local Config = require(game.ServerScriptService.Core.Config)
+local FoodConfig = require(game.ServerScriptService.Core.FoodConfig)
 
 local SaveService = {}
 
@@ -90,8 +91,8 @@ local function applyDefaults(profile)
 	profile.location = profile.location or Config.Player.StartLocation or "Kiosk"
 
 	profile.money = profile.money or 0
-		profile.businessLevel = profile.businessLevel or 1
-		profile.ServedCount = profile.ServedCount or 0
+	profile.businessLevel = profile.businessLevel or 1
+	profile.ServedCount = profile.ServedCount or 0
 
 	profile.stations = profile.stations or defaults.stations
 	profile.unlockedFoods = profile.unlockedFoods or defaults.unlockedFoods
@@ -99,6 +100,41 @@ local function applyDefaults(profile)
 	profile.Business = profile.Business or defaults.Business
 	profile.Money = profile.Money or profile.money
 	profile.BusinessLevel = profile.BusinessLevel or profile.businessLevel
+
+	local canonicalMap = {}
+	for foodId in pairs(FoodConfig.Foods) do
+		canonicalMap[string.lower(foodId)] = foodId
+	end
+	for foodId in pairs(FoodConfig.FoodsPremium) do
+		canonicalMap[string.lower(foodId)] = foodId
+	end
+
+	if type(profile.Business.UnlockedFoods) == "table" then
+		for key, value in pairs(profile.Business.UnlockedFoods) do
+			if value == true then
+				local canonical = canonicalMap[string.lower(key)]
+				if canonical and canonical ~= key then
+					profile.Business.UnlockedFoods[canonical] = true
+					profile.Business.UnlockedFoods[key] = nil
+				end
+			end
+		end
+	end
+
+	if type(profile.unlockedFoods) == "table" then
+		local normalized = {}
+		local seen = {}
+		for _, key in ipairs(profile.unlockedFoods) do
+			local canonical = canonicalMap[string.lower(key)]
+			if canonical and not seen[canonical] then
+				table.insert(normalized, canonical)
+				seen[canonical] = true
+			end
+		end
+		if #normalized > 0 then
+			profile.unlockedFoods = normalized
+		end
+	end
 
 	return profile
 end

@@ -50,7 +50,7 @@ end
 -- BASE ORDER (обычное меню)
 ---------------------------------------------------------------------
 
-local function generateBaseOrder(menuLevel, stationLevels, unlockedFoods)
+local function generateBaseOrder(menuLevel, stationLevels, unlockedFoods, enabledFoods)
 	local items = {}
 	local usedCategories = {}
 
@@ -68,6 +68,16 @@ local function generateBaseOrder(menuLevel, stationLevels, unlockedFoods)
 				stationLevels,
 				unlockedFoods
 			)
+
+			if type(enabledFoods) == "table" then
+				local filtered = {}
+				for _, food in ipairs(foods) do
+					if enabledFoods[food.Id] == true then
+						table.insert(filtered, food)
+					end
+				end
+				foods = filtered
+			end
 
 			if #foods > 0 then
 				usedCategories[categoryId] = true
@@ -171,12 +181,14 @@ function OrderGenerator.Generate(context)
 	local menuLevel = context.menuLevel or 1
 	local stationLevels = context.stationLevels or {}
 	local unlockedFoods = context.unlockedFoods or {}
+	local enabledFoods = context.enabledFoods
 
 	-- 1️⃣ обычный заказ
 	local items, usedCategories = generateBaseOrder(
 		menuLevel,
 		stationLevels,
-		unlockedFoods
+		unlockedFoods,
+		enabledFoods
 	)
 
 	-- 2️⃣ premium-pass

@@ -31,10 +31,14 @@ local profileLoadedCallbacks = {}
 ----------------------------------------------------
 
 local function createDefaultProfile()
-	local unlocked = { "burger", "tea" }
+	local unlocked = { "Burger", "Cola" }
 	local unlockedMap = {
-		burger = true,
-		tea = true,
+		Burger = true,
+		Cola = true,
+	}
+	local enabledMap = {
+		Burger = true,
+		Cola = true,
 	}
 
 	return {
@@ -46,7 +50,7 @@ local function createDefaultProfile()
 			DRINK = { level = 1 },
 		},
 		unlockedFoods = unlocked,
-		enabledFoods = nil,
+		enabledFoods = { "Burger", "Cola" },
 		employees = nil,
 		location = "Kiosk",
 		ServedCount = 0,
@@ -68,6 +72,7 @@ local function createDefaultProfile()
 				Future = {},
 			},
 			UnlockedFoods = unlockedMap,
+			EnabledFoods = enabledMap,
 			Employees = {},
 		},
 	}
@@ -96,10 +101,17 @@ local function applyDefaults(profile)
 
 	profile.stations = profile.stations or defaults.stations
 	profile.unlockedFoods = profile.unlockedFoods or defaults.unlockedFoods
+	profile.enabledFoods = profile.enabledFoods or defaults.enabledFoods
 
 	profile.Business = profile.Business or defaults.Business
 	profile.Money = profile.Money or profile.money
 	profile.BusinessLevel = profile.BusinessLevel or profile.businessLevel
+	if type(profile.Business.UnlockedFoods) ~= "table" then
+		profile.Business.UnlockedFoods = {}
+	end
+	if type(profile.Business.EnabledFoods) ~= "table" then
+		profile.Business.EnabledFoods = {}
+	end
 
 	local canonicalMap = {}
 	for foodId in pairs(FoodConfig.Foods) do
@@ -109,15 +121,32 @@ local function applyDefaults(profile)
 		canonicalMap[string.lower(foodId)] = foodId
 	end
 
-	if type(profile.Business.UnlockedFoods) == "table" then
-		for key, value in pairs(profile.Business.UnlockedFoods) do
+	local function normalizeBusinessMap(map)
+		if type(map) ~= "table" then
+			return
+		end
+
+		for key, value in pairs(map) do
 			if value == true then
 				local canonical = canonicalMap[string.lower(key)]
 				if canonical and canonical ~= key then
-					profile.Business.UnlockedFoods[canonical] = true
-					profile.Business.UnlockedFoods[key] = nil
+					map[canonical] = true
+					map[key] = nil
 				end
+			else
+				map[key] = nil
 			end
+		end
+	end
+
+	normalizeBusinessMap(profile.Business.UnlockedFoods)
+	normalizeBusinessMap(profile.Business.EnabledFoods)
+
+	for foodId in pairs(profile.Business.EnabledFoods) do
+		if not profile.Business.UnlockedFoods[foodId] then
+			profile.Business.EnabledFoods[foodId] = nil
+		elseif not FoodConfig.GetFoodById(foodId) then
+			profile.Business.EnabledFoods[foodId] = nil
 		end
 	end
 

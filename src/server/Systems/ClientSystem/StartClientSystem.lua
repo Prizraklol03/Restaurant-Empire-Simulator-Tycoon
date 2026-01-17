@@ -98,6 +98,10 @@ local function sendCashRegister(state, payload)
 	UpdateCashRegisterUI:FireClient(state.player, payload)
 end
 
+local orderHasRemainingForStation
+local pickNextFoodForStation
+local getUnitFinalCookTime
+
 local function setCashPrompt(state, mode)
 	local cashPrompt = state.cashPrompt
 	if not cashPrompt then
@@ -115,20 +119,41 @@ local function setCashPrompt(state, mode)
 	end
 end
 
-local function setStationPrompts(state, stationType, cookTime)
-	local holdDuration = cookTime and math.max(0.1, cookTime) or 0
+local function setStationPrompts(state)
+	local order = state.currentOrder
 
-	for _, prompt in ipairs(state.grillPrompts) do
-		prompt.Enabled = stationType == "GRILL"
-		prompt.ActionText = "Cook"
-		prompt.HoldDuration = holdDuration
+	local function configurePrompts(prompts, stationType)
+		for _, prompt in ipairs(prompts) do
+			prompt.Enabled = false
+			prompt.ActionText = "Cook"
+			prompt.HoldDuration = 0
+		end
+
+		if not order then
+			return
+		end
+
+		if not orderHasRemainingForStation(order, stationType) then
+			return
+		end
+
+		local foodId = pickNextFoodForStation(order, stationType)
+		if not foodId then
+			return
+		end
+
+		local cookTime = getUnitFinalCookTime(state.player, foodId)
+		local holdDuration = math.max(0.1, cookTime)
+
+		for _, prompt in ipairs(prompts) do
+			prompt.Enabled = true
+			prompt.ActionText = "Cook"
+			prompt.HoldDuration = holdDuration
+		end
 	end
 
-	for _, prompt in ipairs(state.drinkPrompts) do
-		prompt.Enabled = stationType == "DRINK"
-		prompt.ActionText = "Cook"
-		prompt.HoldDuration = holdDuration
-	end
+	configurePrompts(state.grillPrompts, "GRILL")
+	configurePrompts(state.drinkPrompts, "DRINK")
 end
 
 local function getClientRoot(model)
@@ -160,40 +185,14 @@ local function moveToAndConfirm(model, targetPos, radius, timeout)
 	return false
 end
 
-local function computePlannedOrder(state)
-	local items = OrderGenerator.Generate({
-		menuLevel = 1,
-		stationLevels = PlayerService.GetStationLevels(state.player),
-		unlockedFoods = PlayerService.GetSave(state.player).Business.UnlockedFoods,
-	})
-
-	local baseCookSum = 0
-	local stationType = nil
-	local warnedMissingFood = false
-	local warnedMixedStations = false
-
-	local function registerFood(foodId, qty)
-		local food = FoodConfig.GetFoodById(foodId)
-		if food and food.BaseCookTime then
-			local finalQty = qty or 1
-			baseCookSum += (food.BaseCookTime * finalQty)
-			if not stationType then
-				stationType = food.Station
-			elseif stationType ~= food.Station and not warnedMixedStations then
-				warn("[PlannedOrder] mixed stations in planned order")
-				warnedMixedStations = true
-			end
-		else
-			if not warnedMissingFood then
-				warn("[PlannedOrder] missing FoodConfig for", foodId)
-				warnedMissingFood = true
-			end
-		end
+local function forEachPlannedItem(items, handler)
+	if type(items) ~= "table" then
+		return
 	end
 
 	if #items > 0 then
 		for _, foodId in ipairs(items) do
-			registerFood(foodId, 1)
+			handler(foodId, 1)
 		end
 	else
 		for foodId, entry in pairs(items) do
@@ -203,23 +202,111 @@ local function computePlannedOrder(state)
 			elseif type(entry) == "number" then
 				qty = entry
 			end
-			registerFood(foodId, qty)
+			handler(foodId, qty)
 		end
 	end
+end
 
-	stationType = stationType or "GRILL"
-
-	local stationLevels = PlayerService.GetStationLevels(state.player) or {}
-	local level = stationLevels[stationType] or 1
+local function getStationMultiplier(stationLevels, stationType)
+	local levels = stationLevels or {}
+	local level = levels[stationType] or 1
 	local stationMult = 1.0
 	local stationCfg = Config.Cooking.Stations[stationType]
 	if stationCfg and stationCfg.Levels and stationCfg.Levels[level] then
 		stationMult = stationCfg.Levels[level].CookTimeMultiplier or 1.0
 	end
+	return stationMult
+end
 
-	local finalCookSum = baseCookSum * stationMult
+local function buildRemainingUnits(items)
+	local remaining = {}
+	forEachPlannedItem(items, function(foodId, qty)
+		if qty > 0 then
+			remaining[foodId] = (remaining[foodId] or 0) + qty
+		end
+	end)
+	return remaining
+end
 
-	return items, baseCookSum, finalCookSum, stationType
+orderHasRemainingForStation = function(order, stationType)
+	if not order or not order.remainingUnits then
+		return false
+	end
+
+	for foodId, qty in pairs(order.remainingUnits) do
+		if qty > 0 then
+			local food = FoodConfig.GetFoodById(foodId)
+			if food and food.Station == stationType then
+				return true
+			end
+		end
+	end
+
+	return false
+end
+
+pickNextFoodForStation = function(order, stationType)
+	if not order or not order.remainingUnits then
+		return nil
+	end
+
+	local candidates = {}
+	for foodId, qty in pairs(order.remainingUnits) do
+		if qty > 0 then
+			local food = FoodConfig.GetFoodById(foodId)
+			if food and food.Station == stationType then
+				table.insert(candidates, foodId)
+			end
+		end
+	end
+
+	table.sort(candidates)
+	return candidates[1]
+end
+
+getUnitFinalCookTime = function(player, foodId)
+	local food = FoodConfig.GetFoodById(foodId)
+	if not food then
+		return 0
+	end
+
+	local stationLevels = PlayerService.GetStationLevels(player)
+	local mult = getStationMultiplier(stationLevels, food.Station)
+	return (food.BaseCookTime or 0) * mult
+end
+
+local function computePlannedOrder(state)
+	local stationLevels = PlayerService.GetStationLevels(state.player)
+	local items = OrderGenerator.Generate({
+		menuLevel = 1,
+		stationLevels = stationLevels,
+		unlockedFoods = PlayerService.GetUnlockedFoods(state.player),
+		enabledFoods = PlayerService.GetEnabledFoods(state.player),
+	})
+
+	local baseCookSum = 0
+	local finalCookSum = 0
+	local stations = {}
+	local warnedMissingFood = false
+
+	forEachPlannedItem(items, function(foodId, qty)
+		local food = FoodConfig.GetFoodById(foodId)
+		if food and food.BaseCookTime then
+			local finalQty = qty or 1
+			local baseCook = food.BaseCookTime * finalQty
+			baseCookSum += baseCook
+			local stationMult = getStationMultiplier(stationLevels, food.Station)
+			finalCookSum += baseCook * stationMult
+			stations[food.Station] = true
+		else
+			if not warnedMissingFood then
+				warn("[PlannedOrder] missing FoodConfig for", foodId)
+				warnedMissingFood = true
+			end
+		end
+	end)
+
+	return items, baseCookSum, finalCookSum, stations
 end
 
 local function recomputeQueueDeadlines(state)
@@ -277,7 +364,7 @@ local function resetInteraction(state)
 	state.currentAtRegister = nil
 	state.registerWaitStartAt = nil
 	setCashPrompt(state, "DISABLED")
-	setStationPrompts(state, nil, nil)
+	setStationPrompts(state)
 end
 
 local function isOrderPointClear(state, radius)
@@ -403,6 +490,14 @@ local function spawnClient(state)
 		return
 	end
 
+	local items, baseCookSum, finalCookSum, stations = computePlannedOrder(state)
+	if not items or next(items) == nil then
+		if Config.Server.DebugMode then
+			warn("[MenuClosed] no enabled foods available; skipping spawn")
+		end
+		return
+	end
+
 	state.clientCounter += 1
 	local clientId = state.clientCounter
 	local model = template:Clone()
@@ -422,16 +517,28 @@ local function spawnClient(state)
 		moveToken = 0,
 	}
 
-	local items, baseCookSum, finalCookSum, stationType = computePlannedOrder(state)
 	local client = state.clients[clientId]
 	client.plannedItems = items
 	client.plannedBaseCook = baseCookSum
 	client.plannedFinalCook = finalCookSum
-	client.plannedStation = stationType
+	client.plannedStations = stations
 	client.queueDeadlineAt = nil
 	client.takeDeadlineAt = nil
 
-	print(string.format("[PlannedOrder] clientId=%s station=%s base=%.2f final=%.2f", tostring(clientId), tostring(stationType), baseCookSum, finalCookSum))
+	if Config.Server.DebugMode then
+		local stationList = {}
+		for station in pairs(stations) do
+			table.insert(stationList, station)
+		end
+		table.sort(stationList)
+		print(string.format(
+			"[PlannedOrder] clientId=%s base=%.2f final=%.2f stations=%s",
+			tostring(clientId),
+			baseCookSum,
+			finalCookSum,
+			table.concat(stationList, ",")
+		))
+	end
 
 	print(string.format("[Spawn] player=%s clientId=%s queueSize=%d/%d", state.player.UserId, clientId, countQueue(state), state.numSpots))
 	assignClientToSpot(state, clientId, freeSpot)
@@ -538,7 +645,7 @@ local function promoteToRegister(state)
 			print("[PromoteToRegister] reached orderPoint, freed Spot_1")
 			print("[HOWTO] Клиент у кассы. Нажми Take Order на CashRegister.")
 			setCashPrompt(state, "TAKE")
-			setStationPrompts(state, nil, nil)
+			setStationPrompts(state)
 			shiftQueueForward(state)
 		else
 			print("[PromoteToRegister] failed reach orderPoint, will retry")
@@ -565,10 +672,17 @@ local function createOrder(state)
 	local items = client and client.plannedItems
 	local baseCookSum = client and client.plannedBaseCook
 	local finalCookSum = client and client.plannedFinalCook
-	local stationType = client and client.plannedStation
+	local stations = client and client.plannedStations
 
 	if not items then
-		items, baseCookSum, finalCookSum, stationType = computePlannedOrder(state)
+		items, baseCookSum, finalCookSum, stations = computePlannedOrder(state)
+	end
+
+	if not items or next(items) == nil then
+		if Config.Server.DebugMode then
+			warn("[MenuClosed] no enabled foods available; cannot create order")
+		end
+		return
 	end
 
 	local order = OrderService.CreateOrder(state.player, clientId, {
@@ -586,17 +700,37 @@ local function createOrder(state)
 		clientId = clientId,
 		state = "CREATED",
 		ready = false,
-		stationType = stationType or order.stationType,
+		items = items,
+		remainingUnits = buildRemainingUnits(items),
+		stations = stations or {},
 		baseCookTime = baseCookSum or order.cookTime or 0,
 		cookTime = finalCookSum or order.cookTime,
 		deadlineAt = os.clock() + math.clamp((baseCookSum or 0) + ORDER_BUFFER, ORDER_MIN, ORDER_MAX),
 		price = order.price,
 	}
 
+	local stationType = nil
+	if stations then
+		local stationList = {}
+		for station in pairs(stations) do
+			table.insert(stationList, station)
+		end
+		table.sort(stationList)
+		if #stationList == 1 then
+			stationType = stationList[1]
+		elseif #stationList > 1 then
+			stationType = "MIXED"
+		end
+	end
+
 	print(string.format("[Order] created player=%s clientId=%s orderId=%s", state.player.UserId, clientId, order.id))
-	print(string.format("[HOWTO] Заказ создан: station=%s. Нажми %s.", order.stationType, order.stationType))
+	if stationType then
+		print(string.format("[HOWTO] Заказ создан: station=%s. Нажми %s.", stationType, stationType))
+	else
+		print("[HOWTO] Заказ создан.")
+	end
 	setCashPrompt(state, "COOKING")
-	setStationPrompts(state, state.currentOrder.stationType, state.currentOrder.cookTime)
+	setStationPrompts(state)
 	if client then
 		client.takeDeadlineAt = nil
 	end
@@ -617,7 +751,7 @@ local function createOrder(state)
 		clientId = clientId,
 		orderId = order.id,
 		items = order.items,
-		stationType = state.currentOrder.stationType,
+		stationType = stationType,
 		baseCookTime = state.currentOrder.baseCookTime,
 		cookTime = state.currentOrder.cookTime,
 		deadlineAt = state.currentOrder.deadlineAt,
@@ -690,27 +824,50 @@ local function startCooking(state, stationType)
 		return
 	end
 
-	if order.ready or order.state == "COOKING" then
+	if order.ready then
 		return
 	end
 
-	if order.stationType ~= stationType then
-		warn("[Cook] wrong station", stationType)
+	local foodId = pickNextFoodForStation(order, stationType)
+	if not foodId then
 		return
 	end
 
-	order.ready = true
-	order.state = "READY"
-	print(string.format("[Cook] ready player=%s orderId=%s", state.player.UserId, order.orderId))
-	print("[HOWTO] Блюдо готово. Нажми Give Order на CashRegister.")
-	setStationPrompts(state, nil, nil)
-	setCashPrompt(state, "GIVE")
+	order.remainingUnits[foodId] = (order.remainingUnits[foodId] or 1) - 1
+	if order.remainingUnits[foodId] <= 0 then
+		order.remainingUnits[foodId] = nil
+	end
 
-	sendCashRegister(state, {
-		v = 1,
-		state = "READY",
-		orderId = order.orderId,
-	})
+	local remainingTotal = 0
+	for _, qty in pairs(order.remainingUnits) do
+		remainingTotal += qty
+	end
+
+	if Config.Server.DebugMode then
+		print(string.format(
+			"[CookUnit] station=%s foodId=%s remainingTotal=%d",
+			tostring(stationType),
+			tostring(foodId),
+			remainingTotal
+		))
+	end
+
+	if remainingTotal <= 0 then
+		order.ready = true
+		order.state = "READY"
+		print(string.format("[Cook] ready player=%s orderId=%s", state.player.UserId, order.orderId))
+		print("[HOWTO] Блюдо готово. Нажми Give Order на CashRegister.")
+		setStationPrompts(state)
+		setCashPrompt(state, "GIVE")
+
+		sendCashRegister(state, {
+			v = 1,
+			state = "READY",
+			orderId = order.orderId,
+		})
+	else
+		setStationPrompts(state)
+	end
 end
 
 local function bindPrompts(state)
@@ -847,7 +1004,7 @@ function StartClientSystem.StartForPlayer(player, business)
 
 	bindPrompts(state)
 	setCashPrompt(state, "DISABLED")
-	setStationPrompts(state, nil, nil)
+	setStationPrompts(state)
 	Active[player] = state
 
 	state.loop = task.spawn(function()

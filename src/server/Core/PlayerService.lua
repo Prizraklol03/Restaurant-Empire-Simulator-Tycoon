@@ -9,6 +9,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local SaveService = require(ServerScriptService.Core.SaveService)
 local Config = require(ServerScriptService.Core.Config)
+local FoodConfig = require(ServerScriptService.Core.FoodConfig)
 
 local PlayerService = {}
 
@@ -156,6 +157,52 @@ end
 function PlayerService.UnlockFood(player, foodId)
 	local business = getBusiness(getSave(player))
 	business.UnlockedFoods[foodId] = true
+end
+
+function PlayerService.GetUnlockedFoods(player)
+	local business = getBusiness(getSave(player))
+	return business.UnlockedFoods
+end
+
+function PlayerService.GetEnabledFoods(player)
+	local business = getBusiness(getSave(player))
+	return business.EnabledFoods
+end
+
+function PlayerService.SetFoodEnabled(player, foodId, enabled)
+	local business = getBusiness(getSave(player))
+	local food = FoodConfig.GetFoodById(foodId)
+	if not food then
+		return false, "unknown_food"
+	end
+
+	if enabled then
+		if not business.UnlockedFoods[foodId] then
+			return false, "locked"
+		end
+		business.EnabledFoods[foodId] = true
+	else
+		business.EnabledFoods[foodId] = nil
+	end
+
+	return true
+end
+
+function PlayerService.HasAnyEnabledFood(player, menuLevel, stationLevels)
+	local business = getBusiness(getSave(player))
+	local unlockedFoods = business.UnlockedFoods or {}
+	local enabledFoods = business.EnabledFoods or {}
+	local levels = stationLevels or PlayerService.GetStationLevels(player)
+	local level = menuLevel or PlayerService.GetBusinessLevel(player)
+
+	for foodId in pairs(enabledFoods) do
+		local food = FoodConfig.GetFoodById(foodId)
+		if food and FoodConfig.IsFoodAvailable(food, level, levels, unlockedFoods) then
+			return true
+		end
+	end
+
+	return false
 end
 
 ----------------------------------------------------

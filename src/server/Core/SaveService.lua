@@ -48,6 +48,7 @@ local function createDefaultProfile()
 		enabledFoods = nil,
 		employees = nil,
 		location = "Kiosk",
+		ServedCount = 0,
 
 		-- Legacy compatibility
 		Version = "2.0",
@@ -89,7 +90,8 @@ local function applyDefaults(profile)
 	profile.location = profile.location or Config.Player.StartLocation or "Kiosk"
 
 	profile.money = profile.money or 0
-	profile.businessLevel = profile.businessLevel or 1
+		profile.businessLevel = profile.businessLevel or 1
+		profile.ServedCount = profile.ServedCount or 0
 
 	profile.stations = profile.stations or defaults.stations
 	profile.unlockedFoods = profile.unlockedFoods or defaults.unlockedFoods

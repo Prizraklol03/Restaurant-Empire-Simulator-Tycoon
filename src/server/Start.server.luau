@@ -29,6 +29,7 @@ local StartClientSystem = safeRequire(ClientSystemFolder:WaitForChild("StartClie
 
 RemoteSetup.EnsureRemotes()
 HealthCheck.Run()
+HealthCheck.RunStageAudit()
 RemoteHandlers.Bind()
 
 Players.PlayerAdded:Connect(function(player)

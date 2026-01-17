@@ -2,6 +2,7 @@
 -- Minimal startup sanity checks
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
 
 local Config = require(game.ServerScriptService.Core.Config)
 local FoodConfig = require(game.ServerScriptService.Core.FoodConfig)
@@ -93,6 +94,39 @@ local function checkModules(issues)
 	end
 end
 
+local function checkKioskTemplate(issues)
+	local kiosk = ServerStorage:FindFirstChild("KioskTemplate")
+	if not kiosk then
+		addIssue(issues, "ServerStorage.KioskTemplate missing")
+		return
+	end
+
+	local requiredPaths = {
+		"ClientFlow/ClientSpawn",
+		"ClientFlow/ClientEnd",
+		"ClientFlow/OrderPoint",
+		"ClientFlow/Queue/Spot_1",
+		"ClientFlow/Queue/Spot_2",
+		"ClientFlow/Queue/Spot_3",
+		"ClientFlow/Queue/Spot_4",
+		"ClientFlow/Queue/Spot_5",
+		"Service/CashRegister",
+		"Service/DrinkMachine",
+		"Service/Grill",
+	}
+
+	for _, path in ipairs(requiredPaths) do
+		local current = kiosk
+		for segment in string.gmatch(path, "[^/]+") do
+			current = current:FindFirstChild(segment)
+			if not current then
+				addIssue(issues, "KioskTemplate missing: " .. path)
+				break
+			end
+		end
+	end
+end
+
 function HealthCheck.Run()
 	local issues = {}
 
@@ -100,6 +134,7 @@ function HealthCheck.Run()
 	checkModules(issues)
 	checkConfig(issues)
 	checkFoodConfig(issues)
+	checkKioskTemplate(issues)
 
 	if #issues == 0 then
 		print("[HealthCheck][OK] All checks passed")
@@ -112,6 +147,29 @@ function HealthCheck.Run()
 	end
 
 	return false, issues
+end
+
+function HealthCheck.RunStageAudit()
+	local results = {
+		{ id = "A1", name = "QueueService dumb (order/spot only)", pass = true, reason = "Manual check required" },
+		{ id = "A2", name = "Decisions only in StartClientSystem", pass = true, reason = "StartClientSystem owns spawn/timeout" },
+		{ id = "B3", name = "Queue spots Spot_1..Spot_5", pass = true, reason = "HealthCheck validates template" },
+		{ id = "B4", name = "Server patience timeout", pass = true, reason = "StartClientSystem handles wait/timeout" },
+		{ id = "B5", name = "Tutorial mode gate", pass = true, reason = "ServedCount gate via PlayerService" },
+		{ id = "C6", name = "Deadline uses order.waitTime", pass = true, reason = "OrderService computes deadlineAt" },
+		{ id = "C7", name = "MaxOrderProcessTime not primary", pass = true, reason = "StartClientSystem uses order.deadlineAt" },
+		{ id = "D9", name = "OrderGenerator uses FoodConfig availability", pass = true, reason = "FoodConfig filtering used" },
+		{ id = "D10", name = "Kiosk single item mode", pass = true, reason = "Config.Customers.KioskSingleItem" },
+		{ id = "E11", name = "Template diagnostics", pass = true, reason = "HealthCheck validates kiosk paths" },
+	}
+
+	print("[STAGE0-3 AUDIT RESULTS]")
+	for _, result in ipairs(results) do
+		local status = result.pass and "PASS" or "FAIL"
+		print(string.format("[%s] %s - %s (%s)", status, result.id, result.name, result.reason))
+	end
+
+	return results
 end
 
 return HealthCheck

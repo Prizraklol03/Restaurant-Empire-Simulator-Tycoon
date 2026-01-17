@@ -49,6 +49,8 @@ Config.Customers = {
 	MaxWaitTime = 20,
 	MaxOrderProcessTime = 30,
 	RegisterRadius = 4,
+	TutorialPatienceMultiplier = 3,
+	KioskSingleItem = true,
 
 	Models = {
 		"ClientTemplate",

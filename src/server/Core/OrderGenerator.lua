@@ -182,6 +182,21 @@ function OrderGenerator.Generate(context)
 	-- 2️⃣ premium-pass
 	applyPremiumPass(items, usedCategories, context)
 
+	local maxItems = context.maxItems
+	if maxItems == 1 then
+		local firstKey
+		for key in pairs(items) do
+			firstKey = key
+			break
+		end
+
+		if firstKey then
+			items = {
+				[firstKey] = items[firstKey],
+			}
+		end
+	end
+
 	return items
 end
 

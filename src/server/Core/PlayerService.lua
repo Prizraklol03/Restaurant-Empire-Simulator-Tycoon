@@ -181,6 +181,21 @@ function PlayerService.DebugDump(player)
 end
 
 ----------------------------------------------------
+-- SERVED COUNT (TUTORIAL GATE)
+----------------------------------------------------
+
+function PlayerService.GetServedCount(player)
+	local save = getSave(player)
+	return save.ServedCount or 0
+end
+
+function PlayerService.IncrementServedCount(player)
+	local save = getSave(player)
+	save.ServedCount = (save.ServedCount or 0) + 1
+	return save.ServedCount
+end
+
+----------------------------------------------------
 -- SAFETY
 ----------------------------------------------------
 

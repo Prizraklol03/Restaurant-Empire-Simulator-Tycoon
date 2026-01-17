@@ -133,6 +133,7 @@ local function assignClientToSpot(state, clientId, spotIndex)
 	state.spotOccupant[spotIndex] = clientId
 	state.clientSpotIndex[clientId] = spotIndex
 	client.state = "Queue"
+	client.queueStart = client.queueStart or os.clock()
 
 	local pos = getSpotPosition(state.queueSpots[spotIndex])
 	if not pos then
@@ -176,6 +177,7 @@ local function shiftQueueForward(state)
 			if client and client.model then
 				client.state = "Queue"
 				client.atSpot = false
+				client.queueStart = client.queueStart or os.clock()
 				client.moveToken += 1
 				local token = client.moveToken
 				local pos = getSpotPosition(state.queueSpots[index])
@@ -240,12 +242,38 @@ local function spawnClient(state)
 		spotIndex = nil,
 		atSpot = false,
 		moveToken = 0,
+		queueStart = os.clock(),
 	}
 
-	print(string.format("[Spawn] player=%s clientId=%s queueSize=%d/%d", state.player.UserId, clientId, countQueue(state), #state.queueSpots))
+	print(string.format("[Spawn] player=%s clientId=%s queueSize=%d/%d", state.player.UserId, clientId, countQueue(state), state.numSpots))
 	assignClientToSpot(state, clientId, freeSpot)
 	logOccupancy(state)
 	updateBusinessStats(state)
+end
+
+local function removeClientFromQueue(state, clientId, reason)
+	local client = state.clients[clientId]
+	if not client then
+		return
+	end
+
+	local spotIndex = state.clientSpotIndex[clientId]
+	if spotIndex then
+		state.spotOccupant[spotIndex] = nil
+		state.clientSpotIndex[clientId] = nil
+	end
+
+	print(string.format("[QueueExit] clientId=%s reason=%s", clientId, reason))
+	local pos = getSpotPosition(state.endPoint)
+	if client.model and pos then
+		client.state = "Exit"
+		client.moveToken += 1
+		moveToAndConfirm(client.model, pos, 2.0, 8)
+		client.model:Destroy()
+	end
+
+	state.clients[clientId] = nil
+	shiftQueueForward(state)
 end
 
 local function promoteToRegister(state)
@@ -322,6 +350,7 @@ local function createOrder(state)
 		menuLevel = 1,
 		stationLevels = PlayerService.GetStationLevels(state.player),
 		unlockedFoods = PlayerService.GetSave(state.player).Business.UnlockedFoods,
+		maxItems = Config.Customers.KioskSingleItem and 1 or nil,
 	})
 
 	local order = OrderService.CreateOrder(state.player, clientId, {
@@ -369,6 +398,7 @@ local function completeOrder(state)
 	OrderService.CompleteOrder(order.orderId)
 	PlayerService.AddMoney(state.player, order.price or 0)
 	state.servedCount += 1
+	PlayerService.IncrementServedCount(state.player)
 
 	print(string.format("[Order] completed player=%s orderId=%s", state.player.UserId, order.orderId))
 
@@ -539,12 +569,27 @@ local function bindPrompts(state)
 end
 
 local function update(state)
-	if os.clock() >= state.nextSpawnAt and countQueue(state) < #state.queueSpots then
+	if os.clock() >= state.nextSpawnAt and countQueue(state) < state.numSpots then
 		spawnClient(state)
 		state.nextSpawnAt = os.clock() + math.random(SPAWN_MIN, SPAWN_MAX)
 	end
 
 	promoteToRegister(state)
+
+	local patienceMultiplier = 1
+	if PlayerService.GetServedCount(state.player) < 1 then
+		patienceMultiplier = Config.Customers.TutorialPatienceMultiplier or 1
+	end
+
+	for index = 1, state.numSpots do
+		local clientId = state.spotOccupant[index]
+		local client = clientId and state.clients[clientId]
+		if client and client.state == "Queue" and client.queueStart then
+			if os.clock() - client.queueStart > (Config.Customers.MaxWaitTime * patienceMultiplier) then
+				removeClientFromQueue(state, clientId, "patience_timeout")
+			end
+		end
+	end
 
 	local order = state.currentOrder
 	if order and os.clock() > order.deadlineAt and not order.ready then

@@ -30,6 +30,39 @@ local profileLoadedCallbacks = {}
 -- DEFAULT PROFILE
 ----------------------------------------------------
 
+local DEFAULT_START_FOODS = { "Burger", "Cola" }
+
+local function ensureFoodTables(profile)
+	profile.Business = profile.Business or {}
+	profile.Business.UnlockedFoods = profile.Business.UnlockedFoods or {}
+	profile.Business.EnabledFoods = profile.Business.EnabledFoods or {}
+
+	if profile.Business.FoodsInitialized ~= true then
+		local unlockedEmpty = next(profile.Business.UnlockedFoods) == nil
+		local enabledEmpty = next(profile.Business.EnabledFoods) == nil
+		if unlockedEmpty and enabledEmpty then
+			for _, foodId in ipairs(DEFAULT_START_FOODS) do
+				profile.Business.UnlockedFoods[foodId] = true
+				profile.Business.EnabledFoods[foodId] = true
+			end
+		end
+		profile.Business.FoodsInitialized = true
+	end
+
+	for foodId, value in pairs(profile.Business.EnabledFoods) do
+		if value == true then
+			local food = FoodConfig.GetFoodById(foodId)
+			if not food then
+				profile.Business.EnabledFoods[foodId] = nil
+			elseif food.Unlock and profile.Business.UnlockedFoods[foodId] ~= true then
+				profile.Business.EnabledFoods[foodId] = nil
+			end
+		else
+			profile.Business.EnabledFoods[foodId] = nil
+		end
+	end
+end
+
 local function createDefaultProfile()
 	local unlocked = { "Burger", "Cola" }
 	local unlockedMap = {
@@ -41,7 +74,7 @@ local function createDefaultProfile()
 		Cola = true,
 	}
 
-	return {
+	local profile = {
 		schemaVersion = 2,
 		money = 0,
 		businessLevel = 1,
@@ -73,9 +106,13 @@ local function createDefaultProfile()
 			},
 			UnlockedFoods = unlockedMap,
 			EnabledFoods = enabledMap,
+			FoodsInitialized = true,
 			Employees = {},
 		},
 	}
+
+	ensureFoodTables(profile)
+	return profile
 end
 
 ----------------------------------------------------
@@ -149,6 +186,8 @@ local function applyDefaults(profile)
 			profile.Business.EnabledFoods[foodId] = nil
 		end
 	end
+
+	ensureFoodTables(profile)
 
 	if type(profile.unlockedFoods) == "table" then
 		local normalized = {}

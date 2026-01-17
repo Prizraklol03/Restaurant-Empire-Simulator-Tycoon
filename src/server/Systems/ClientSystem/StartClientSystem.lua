@@ -340,6 +340,45 @@ local function recomputeQueueDeadlines(state)
 	end
 end
 
+local function logMenuClosed(state)
+	if not Config.Server.DebugMode then
+		return
+	end
+	if state._menuClosedLogged then
+		return
+	end
+
+	state._menuClosedLogged = true
+
+	local unlocked = PlayerService.GetUnlockedFoods(state.player) or {}
+	local enabled = PlayerService.GetEnabledFoods(state.player) or {}
+	local unlockedCount = 0
+	local enabledCount = 0
+	local enabledKeys = {}
+
+	for foodId in pairs(unlocked) do
+		unlockedCount += 1
+	end
+
+	for foodId in pairs(enabled) do
+		enabledCount += 1
+		table.insert(enabledKeys, foodId)
+	end
+
+	table.sort(enabledKeys)
+	local shown = {}
+	for index = 1, math.min(10, #enabledKeys) do
+		shown[index] = enabledKeys[index]
+	end
+
+	warn(string.format(
+		"[MenuClosedDebug] unlocked=%d enabled=%d enabledKeys=%s",
+		unlockedCount,
+		enabledCount,
+		table.concat(shown, ",")
+	))
+end
+
 local function moveClientToEndAndDestroyAsync(state, clientModel)
 	if not clientModel then
 		return
@@ -494,6 +533,7 @@ local function spawnClient(state)
 	if not items or next(items) == nil then
 		if Config.Server.DebugMode then
 			warn("[MenuClosed] no enabled foods available; skipping spawn")
+			logMenuClosed(state)
 		end
 		return
 	end
@@ -681,6 +721,7 @@ local function createOrder(state)
 	if not items or next(items) == nil then
 		if Config.Server.DebugMode then
 			warn("[MenuClosed] no enabled foods available; cannot create order")
+			logMenuClosed(state)
 		end
 		return
 	end

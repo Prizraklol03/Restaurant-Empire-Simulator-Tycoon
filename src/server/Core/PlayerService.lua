@@ -184,6 +184,7 @@ function PlayerService.SetFoodEnabled(player, foodId, enabled)
 	else
 		business.EnabledFoods[foodId] = nil
 	end
+	business.EnabledInitialized = true
 
 	return true
 end

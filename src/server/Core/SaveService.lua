@@ -49,6 +49,30 @@ local function ensureFoodTables(profile)
 		profile.Business.FoodsInitialized = true
 	end
 
+	if profile.Business.EnabledInitialized ~= true then
+		local enabledEmpty = next(profile.Business.EnabledFoods) == nil
+		if enabledEmpty then
+			for _, foodId in ipairs(DEFAULT_START_FOODS) do
+				if profile.Business.UnlockedFoods[foodId] == true and FoodConfig.GetFoodById(foodId) then
+					profile.Business.EnabledFoods[foodId] = true
+				end
+			end
+
+			if next(profile.Business.EnabledFoods) == nil then
+				for foodId, value in pairs(profile.Business.UnlockedFoods) do
+					if value == true and FoodConfig.GetFoodById(foodId) then
+						profile.Business.EnabledFoods[foodId] = true
+						break
+					end
+				end
+			end
+		end
+
+		if next(profile.Business.EnabledFoods) ~= nil then
+			profile.Business.EnabledInitialized = true
+		end
+	end
+
 	for foodId, value in pairs(profile.Business.EnabledFoods) do
 		if value == true then
 			local food = FoodConfig.GetFoodById(foodId)
@@ -106,6 +130,7 @@ local function createDefaultProfile()
 			},
 			UnlockedFoods = unlockedMap,
 			EnabledFoods = enabledMap,
+			EnabledInitialized = true,
 			FoodsInitialized = true,
 			Employees = {},
 		},

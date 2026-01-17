@@ -170,24 +170,41 @@ local function computePlannedOrder(state)
 
 	local baseCookSum = 0
 	local stationType = nil
-	local warnedMissing = false
+	local warnedMissingFood = false
+	local warnedMixedStations = false
 
-	for foodId, entry in pairs(items) do
+	local function registerFood(foodId, qty)
 		local food = FoodConfig.GetFoodById(foodId)
 		if food and food.BaseCookTime then
-			local qty = entry.quantity or 1
-			baseCookSum += (food.BaseCookTime * qty)
+			local finalQty = qty or 1
+			baseCookSum += (food.BaseCookTime * finalQty)
 			if not stationType then
 				stationType = food.Station
-			elseif stationType ~= food.Station and not warnedMissing then
+			elseif stationType ~= food.Station and not warnedMixedStations then
 				warn("[PlannedOrder] mixed stations in planned order")
-				warnedMissing = true
+				warnedMixedStations = true
 			end
 		else
-			if not warnedMissing then
+			if not warnedMissingFood then
 				warn("[PlannedOrder] missing FoodConfig for", foodId)
-				warnedMissing = true
+				warnedMissingFood = true
 			end
+		end
+	end
+
+	if #items > 0 then
+		for _, foodId in ipairs(items) do
+			registerFood(foodId, 1)
+		end
+	else
+		for foodId, entry in pairs(items) do
+			local qty = 1
+			if type(entry) == "table" then
+				qty = entry.quantity or 1
+			elseif type(entry) == "number" then
+				qty = entry
+			end
+			registerFood(foodId, qty)
 		end
 	end
 
@@ -439,7 +456,6 @@ local function removeClientFromQueue(state, clientId, reason)
 	local model = client.model
 	state.clients[clientId] = nil
 	shiftQueueForward(state)
-	recomputeQueueDeadlines(state)
 	if model then
 		moveClientToEndAndDestroyAsync(state, model)
 	end
@@ -525,7 +541,6 @@ local function promoteToRegister(state)
 			setCashPrompt(state, "TAKE")
 			setStationPrompts(state, nil, nil)
 			shiftQueueForward(state)
-			recomputeQueueDeadlines(state)
 		else
 			print("[PromoteToRegister] failed reach orderPoint, will retry")
 			state.currentAtRegister = nil
@@ -603,9 +618,10 @@ local function createOrder(state)
 		clientId = clientId,
 		orderId = order.id,
 		items = order.items,
-		stationType = order.stationType,
-		cookTime = order.cookTime,
-		deadlineAt = order.deadlineAt,
+		stationType = state.currentOrder.stationType,
+		baseCookTime = state.currentOrder.baseCookTime,
+		cookTime = state.currentOrder.cookTime,
+		deadlineAt = state.currentOrder.deadlineAt,
 	})
 end
 

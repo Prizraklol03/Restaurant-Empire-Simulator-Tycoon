@@ -6,6 +6,7 @@ local ServerStorage = game:GetService("ServerStorage")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Config = require(game.ServerScriptService.Core.Config)
+local FoodConfig = require(game.ServerScriptService.Core.FoodConfig)
 local PlayerService = require(game.ServerScriptService.Core.PlayerService)
 local OrderGenerator = require(game.ServerScriptService.Core.OrderGenerator)
 local OrderService = require(game.ServerScriptService.Core.OrderService)
@@ -24,6 +25,13 @@ local Active = {}
 
 local SPAWN_MIN = 3
 local SPAWN_MAX = 6
+local TAKE_ORDER_WINDOW = 10
+local QUEUE_BUFFER = 15
+local QUEUE_MIN = 20
+local QUEUE_MAX = 120
+local ORDER_BUFFER = 8
+local ORDER_MIN = 12
+local ORDER_MAX = 90
 
 local function planarDistance(a, b)
 	local dx = a.X - b.X
@@ -152,6 +160,83 @@ local function moveToAndConfirm(model, targetPos, radius, timeout)
 	return false
 end
 
+local function computePlannedOrder(state)
+	local items = OrderGenerator.Generate({
+		menuLevel = 1,
+		stationLevels = PlayerService.GetStationLevels(state.player),
+		unlockedFoods = PlayerService.GetSave(state.player).Business.UnlockedFoods,
+		maxItems = Config.Customers.KioskSingleItem and 1 or nil,
+	})
+
+	local baseCookSum = 0
+	local stationType = nil
+	local warnedMissing = false
+
+	for foodId, entry in pairs(items) do
+		local food = FoodConfig.GetFoodById(foodId)
+		if food and food.BaseCookTime then
+			local qty = entry.quantity or 1
+			baseCookSum += (food.BaseCookTime * qty)
+			if not stationType then
+				stationType = food.Station
+			elseif stationType ~= food.Station and not warnedMissing then
+				warn("[PlannedOrder] mixed stations in planned order")
+				warnedMissing = true
+			end
+		else
+			if not warnedMissing then
+				warn("[PlannedOrder] missing FoodConfig for", foodId)
+				warnedMissing = true
+			end
+		end
+	end
+
+	stationType = stationType or "GRILL"
+
+	local stationLevels = PlayerService.GetStationLevels(state.player) or {}
+	local level = stationLevels[stationType] or 1
+	local stationMult = 1.0
+	local stationCfg = Config.Cooking.Stations[stationType]
+	if stationCfg and stationCfg.Levels and stationCfg.Levels[level] then
+		stationMult = stationCfg.Levels[level].CookTimeMultiplier or 1.0
+	end
+
+	local finalCookSum = baseCookSum * stationMult
+
+	return items, baseCookSum, finalCookSum, stationType
+end
+
+local function recomputeQueueDeadlines(state)
+	local now = os.clock()
+	local cumulative = 0
+	local patienceMultiplier = 1
+	if PlayerService.GetServedCount(state.player) < 1 then
+		patienceMultiplier = Config.Customers.TutorialPatienceMultiplier or 1
+	end
+
+	if state.currentAtRegister and not state.currentOrder then
+		local c = state.clients[state.currentAtRegister]
+		local base = (c and c.plannedBaseCook) or 0
+		cumulative += TAKE_ORDER_WINDOW + base
+	elseif state.currentOrder and not state.currentOrder.ready then
+		cumulative += (state.currentOrder.baseCookTime or 0)
+	end
+
+	for index = 1, state.numSpots do
+		local clientId = state.spotOccupant[index]
+		local client = clientId and state.clients[clientId]
+		if client then
+			local eta = cumulative + QUEUE_BUFFER
+			local patience = math.clamp(eta * patienceMultiplier, QUEUE_MIN, QUEUE_MAX)
+			client.queueDeadlineAt = now + patience
+
+			local base = client.plannedBaseCook or 0
+			cumulative += TAKE_ORDER_WINDOW + base
+			print(string.format("[QueueETA] clientId=%s spot=%d patience=%.2f", tostring(clientId), index, patience))
+		end
+	end
+end
+
 local function moveClientToEndAndDestroyAsync(state, clientModel)
 	if not clientModel then
 		return
@@ -210,7 +295,6 @@ local function assignClientToSpot(state, clientId, spotIndex)
 	state.spotOccupant[spotIndex] = clientId
 	state.clientSpotIndex[clientId] = spotIndex
 	client.state = "Queue"
-	client.queueStart = client.queueStart or os.clock()
 
 	local pos = getSpotPosition(state.queueSpots[spotIndex])
 	if not pos then
@@ -238,6 +322,7 @@ local function assignClientToSpot(state, clientId, spotIndex)
 		return false
 	end
 
+	recomputeQueueDeadlines(state)
 	return true
 end
 
@@ -254,7 +339,6 @@ local function shiftQueueForward(state)
 			if client and client.model then
 				client.state = "Queue"
 				client.atSpot = false
-				client.queueStart = client.queueStart or os.clock()
 				client.moveToken += 1
 				local token = client.moveToken
 				local pos = getSpotPosition(state.queueSpots[index])
@@ -281,6 +365,7 @@ local function shiftQueueForward(state)
 	end
 
 	logOccupancy(state)
+	recomputeQueueDeadlines(state)
 end
 
 local function spawnClient(state)
@@ -319,8 +404,18 @@ local function spawnClient(state)
 		spotIndex = nil,
 		atSpot = false,
 		moveToken = 0,
-		queueStart = os.clock(),
 	}
+
+	local items, baseCookSum, finalCookSum, stationType = computePlannedOrder(state)
+	local client = state.clients[clientId]
+	client.plannedItems = items
+	client.plannedBaseCook = baseCookSum
+	client.plannedFinalCook = finalCookSum
+	client.plannedStation = stationType
+	client.queueDeadlineAt = nil
+	client.takeDeadlineAt = nil
+
+	print(string.format("[PlannedOrder] clientId=%s station=%s base=%.2f final=%.2f", tostring(clientId), tostring(stationType), baseCookSum, finalCookSum))
 
 	print(string.format("[Spawn] player=%s clientId=%s queueSize=%d/%d", state.player.UserId, clientId, countQueue(state), state.numSpots))
 	assignClientToSpot(state, clientId, freeSpot)
@@ -344,6 +439,7 @@ local function removeClientFromQueue(state, clientId, reason)
 	local model = client.model
 	state.clients[clientId] = nil
 	shiftQueueForward(state)
+	recomputeQueueDeadlines(state)
 	if model then
 		moveClientToEndAndDestroyAsync(state, model)
 	end
@@ -364,6 +460,7 @@ local function removeClientAtRegister(state, reason)
 
 	resetInteraction(state)
 	updateBusinessStats(state)
+	recomputeQueueDeadlines(state)
 	if model then
 		moveClientToEndAndDestroyAsync(state, model)
 	end
@@ -420,12 +517,15 @@ local function promoteToRegister(state)
 		if reachedOrder then
 			state.spotOccupant[1] = nil
 			state.clientSpotIndex[frontId] = nil
-			state.registerWaitStartAt = os.clock()
+			if frontClient then
+				frontClient.takeDeadlineAt = os.clock() + TAKE_ORDER_WINDOW
+			end
 			print("[PromoteToRegister] reached orderPoint, freed Spot_1")
 			print("[HOWTO] Клиент у кассы. Нажми Take Order на CashRegister.")
 			setCashPrompt(state, "TAKE")
 			setStationPrompts(state, nil, nil)
 			shiftQueueForward(state)
+			recomputeQueueDeadlines(state)
 		else
 			print("[PromoteToRegister] failed reach orderPoint, will retry")
 			state.currentAtRegister = nil
@@ -447,12 +547,15 @@ local function createOrder(state)
 		return
 	end
 
-	local items = OrderGenerator.Generate({
-		menuLevel = 1,
-		stationLevels = PlayerService.GetStationLevels(state.player),
-		unlockedFoods = PlayerService.GetSave(state.player).Business.UnlockedFoods,
-		maxItems = Config.Customers.KioskSingleItem and 1 or nil,
-	})
+	local client = state.clients[clientId]
+	local items = client and client.plannedItems
+	local baseCookSum = client and client.plannedBaseCook
+	local finalCookSum = client and client.plannedFinalCook
+	local stationType = client and client.plannedStation
+
+	if not items then
+		items, baseCookSum, finalCookSum, stationType = computePlannedOrder(state)
+	end
 
 	local order = OrderService.CreateOrder(state.player, clientId, {
 		items = items,
@@ -469,16 +572,30 @@ local function createOrder(state)
 		clientId = clientId,
 		state = "CREATED",
 		ready = false,
-		stationType = order.stationType,
-		cookTime = order.cookTime,
-		deadlineAt = order.deadlineAt,
+		stationType = stationType or order.stationType,
+		baseCookTime = baseCookSum or order.cookTime or 0,
+		cookTime = finalCookSum or order.cookTime,
+		deadlineAt = os.clock() + math.clamp((baseCookSum or 0) + ORDER_BUFFER, ORDER_MIN, ORDER_MAX),
 		price = order.price,
 	}
 
 	print(string.format("[Order] created player=%s clientId=%s orderId=%s", state.player.UserId, clientId, order.id))
 	print(string.format("[HOWTO] Заказ создан: station=%s. Нажми %s.", order.stationType, order.stationType))
 	setCashPrompt(state, "COOKING")
-	setStationPrompts(state, order.stationType, order.cookTime)
+	setStationPrompts(state, state.currentOrder.stationType, state.currentOrder.cookTime)
+	if client then
+		client.takeDeadlineAt = nil
+	end
+
+	print(string.format(
+		"[OrderTiming] clientId=%s base=%.2f final=%.2f deadlineIn=%.2f",
+		tostring(clientId),
+		(state.currentOrder.baseCookTime or 0),
+		(state.currentOrder.cookTime or 0),
+		(state.currentOrder.deadlineAt - os.clock())
+	))
+
+	recomputeQueueDeadlines(state)
 
 	sendCashRegister(state, {
 		v = 1,
@@ -511,6 +628,7 @@ local function completeOrder(state)
 
 	resetInteraction(state)
 	updateBusinessStats(state)
+	recomputeQueueDeadlines(state)
 
 	if clientId then
 		state.clients[clientId] = nil
@@ -542,6 +660,7 @@ local function failOrder(state, reason)
 
 	resetInteraction(state)
 	updateBusinessStats(state)
+	recomputeQueueDeadlines(state)
 	if clientId then
 		state.clients[clientId] = nil
 	end
@@ -633,31 +752,28 @@ local function update(state)
 
 	promoteToRegister(state)
 
-	local patienceMultiplier = 1
-	if PlayerService.GetServedCount(state.player) < 1 then
-		patienceMultiplier = Config.Customers.TutorialPatienceMultiplier or 1
-	end
-
-	if state.currentAtRegister ~= nil and state.currentOrder == nil and state.registerWaitStartAt then
-		if os.clock() - state.registerWaitStartAt > (Config.Customers.MaxWaitTime * patienceMultiplier) then
+	if state.currentAtRegister ~= nil and state.currentOrder == nil then
+		local currentClient = state.clients[state.currentAtRegister]
+		local deadline = currentClient and currentClient.takeDeadlineAt
+		if deadline and os.clock() > deadline then
 			print("[RegisterTimeout] client waited too long for Take Order")
-			removeClientAtRegister(state, "register_timeout")
+			removeClientAtRegister(state, "take_timeout")
 		end
 	end
 
 	for index = 1, state.numSpots do
 		local clientId = state.spotOccupant[index]
 		local client = clientId and state.clients[clientId]
-		if client and client.state == "Queue" and client.queueStart then
-			if os.clock() - client.queueStart > (Config.Customers.MaxWaitTime * patienceMultiplier) then
-				removeClientFromQueue(state, clientId, "patience_timeout")
+		if client and client.state == "Queue" and client.queueDeadlineAt then
+			if os.clock() > client.queueDeadlineAt then
+				removeClientFromQueue(state, clientId, "queue_timeout")
 			end
 		end
 	end
 
 	local order = state.currentOrder
 	if order and os.clock() > order.deadlineAt and not order.ready then
-		failOrder(state, "timeout")
+		failOrder(state, "order_timeout")
 	end
 end
 

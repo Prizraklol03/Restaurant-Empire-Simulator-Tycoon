@@ -73,6 +73,86 @@ local function syncFoodMaps(profile, topKey, bizKey)
 	profile.Business[bizKey] = bizMap
 end
 
+local function getStationLevels(profile)
+	local levels = {}
+	local stations = profile.stations or {}
+	local businessStations = profile.Business and profile.Business.Stations or {}
+
+	for stationType, data in pairs(businessStations) do
+		local level = tonumber(data.Level) or 0
+		levels[stationType] = math.max(0, level)
+	end
+
+	for stationType, data in pairs(stations) do
+		if levels[stationType] == nil then
+			local level = tonumber(data.level) or 0
+			levels[stationType] = math.max(0, level)
+		end
+	end
+
+	if next(levels) == nil then
+		levels.GRILL = 1
+		levels.DRINK = 1
+	end
+
+	levels.GRILL = levels.GRILL or 0
+	levels.DRINK = levels.DRINK or 0
+
+	return levels
+end
+
+local function applyStarterFoods(profile)
+	local unlockedTop = normalizeFoodsMap(profile.unlockedFoods)
+	local enabledTop = normalizeFoodsMap(profile.enabledFoods)
+	local unlockedBiz = normalizeFoodsMap(profile.Business and profile.Business.UnlockedFoods)
+	local enabledBiz = normalizeFoodsMap(profile.Business and profile.Business.EnabledFoods)
+
+	local unlocked = {}
+	local enabled = {}
+
+	for key in pairs(unlockedTop) do
+		unlocked[key] = true
+	end
+	for key in pairs(unlockedBiz) do
+		unlocked[key] = true
+	end
+	for key in pairs(enabledTop) do
+		enabled[key] = true
+	end
+	for key in pairs(enabledBiz) do
+		enabled[key] = true
+	end
+
+	local stationLevels = getStationLevels(profile)
+
+	for _, food in pairs(FoodConfig.Foods) do
+		local menuLevel = food.MenuLevel or 1
+		local requiredStation = food.RequiredStationLevel or 1
+		local stationLevel = stationLevels[food.Station] or 0
+		if menuLevel <= 1
+			and requiredStation <= stationLevel
+			and (food.Unlock == nil or food.Unlock == false) then
+			unlocked[food.Id] = true
+			enabled[food.Id] = true
+		end
+	end
+
+	profile.unlockedFoods = unlocked
+	profile.enabledFoods = enabled
+	profile.Business = profile.Business or {}
+	profile.Business.UnlockedFoods = unlocked
+	profile.Business.EnabledFoods = enabled
+
+	if Config.Server.DebugMode and not profile._starterFoodsLogged then
+		profile._starterFoodsLogged = true
+		print(string.format(
+			"[StarterFoods] applied, unlockedCola=%s enabledCola=%s",
+			tostring(unlocked["Cola"]),
+			tostring(enabled["Cola"])
+		))
+	end
+end
+
 local function ensureFoodTables(profile)
 	profile.Business = profile.Business or {}
 	profile.Business.UnlockedFoods = profile.Business.UnlockedFoods or {}
@@ -180,6 +260,7 @@ local function createDefaultProfile()
 	ensureFoodTables(profile)
 	syncFoodMaps(profile, "unlockedFoods", "UnlockedFoods")
 	syncFoodMaps(profile, "enabledFoods", "EnabledFoods")
+	applyStarterFoods(profile)
 	return profile
 end
 
@@ -258,6 +339,7 @@ local function applyDefaults(profile)
 	ensureFoodTables(profile)
 	syncFoodMaps(profile, "unlockedFoods", "UnlockedFoods")
 	syncFoodMaps(profile, "enabledFoods", "EnabledFoods")
+	applyStarterFoods(profile)
 
 	if type(profile.unlockedFoods) == "table" then
 		local normalized = {}

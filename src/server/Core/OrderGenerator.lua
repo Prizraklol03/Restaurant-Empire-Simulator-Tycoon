@@ -5,12 +5,34 @@
 -- 2) отдельный premium-pass (1 блюдо максимум)
 
 local FoodConfig = require(game.ServerScriptService.Core.FoodConfig)
+local Config = require(game.ServerScriptService.Core.Config)
 
 local OrderGenerator = {}
 
 ---------------------------------------------------------------------
 -- INTERNAL HELPERS
 ---------------------------------------------------------------------
+
+local function normalizeBoolMap(value)
+	local map = {}
+	if type(value) ~= "table" then
+		return map
+	end
+	if #value > 0 then
+		for _, entry in ipairs(value) do
+			if type(entry) == "string" and entry ~= "" then
+				map[entry] = true
+			end
+		end
+		return map
+	end
+	for key, entry in pairs(value) do
+		if entry == true then
+			map[key] = true
+		end
+	end
+	return map
+end
 
 -- Взвешенный выбор по OrderChance
 local function weightedPick(list)
@@ -50,53 +72,56 @@ end
 -- BASE ORDER (обычное меню)
 ---------------------------------------------------------------------
 
-local function generateBaseOrder(menuLevel, stationLevels, unlockedFoods, enabledFoods)
+local function generateBaseOrder(candidatesByCategory, categories)
 	local items = {}
 	local usedCategories = {}
+	local picked = {}
 
-	local categories = FoodConfig.GetCategories()
+	local function addFood(food)
+		if picked[food.Id] then
+			return false
+		end
+		picked[food.Id] = true
+		local maxPerOrder = food.MaxPerOrder or 1
+		local quantity = math.random(1, maxPerOrder)
+		items[food.Id] = {
+			quantity = quantity,
+		}
+		return true
+	end
+
+	local mainCandidates = candidatesByCategory.Main or {}
+	if #mainCandidates > 0 then
+		local mainFood = weightedPick(mainCandidates)
+		if mainFood then
+			addFood(mainFood)
+			usedCategories.Main = true
+		end
+	end
 
 	for categoryId, category in pairs(categories) do
+		local foods = candidatesByCategory[categoryId] or {}
+		if #foods == 0 then
+			continue
+		end
+
 		local categoryChance = category.OrderChance or 0
+		if categoryId == "Drink" then
+			categoryChance = math.max(categoryChance, 0.6)
+		end
+
 		local maxItems = category.MaxItems or 1
 
 		-- ролл категории
 		if math.random() <= categoryChance then
-			local foods = FoodConfig.GetAvailableFoodsByCategory(
-				categoryId,
-				menuLevel,
-				stationLevels,
-				unlockedFoods
-			)
+			usedCategories[categoryId] = true
 
-			if type(enabledFoods) == "table" then
-				local filtered = {}
-				for _, food in ipairs(foods) do
-					if enabledFoods[food.Id] == true then
-						table.insert(filtered, food)
-					end
-				end
-				foods = filtered
-			end
+			local distinctCount = math.random(1, math.min(maxItems, #foods))
 
-			if #foods > 0 then
-				usedCategories[categoryId] = true
-
-				local distinctCount = math.random(1, math.min(maxItems, #foods))
-				local picked = {}
-
-				for _ = 1, distinctCount do
-					local food = weightedPick(foods)
-					if food and not picked[food.Id] then
-						picked[food.Id] = true
-
-						local maxPerOrder = food.MaxPerOrder or 1
-						local quantity = math.random(1, maxPerOrder)
-
-						items[food.Id] = {
-							quantity = quantity,
-						}
-					end
+			for _ = 1, distinctCount do
+				local food = weightedPick(foods)
+				if food then
+					addFood(food)
 				end
 			end
 		end
@@ -180,32 +205,54 @@ function OrderGenerator.Generate(context)
 
 	local menuLevel = context.menuLevel or 1
 	local stationLevels = context.stationLevels or {}
-	local unlockedFoods = context.unlockedFoods or {}
-	local enabledFoods = context.enabledFoods
+	local unlockedFoods = normalizeBoolMap(context.unlockedFoods)
+	local enabledFoods = context.enabledFoods == nil and nil or normalizeBoolMap(context.enabledFoods)
+
+	local categories = FoodConfig.GetCategories()
+	local candidatesByCategory = {}
+	local allCandidates = {}
+
+	for categoryId in pairs(categories) do
+		local foods = FoodConfig.GetAvailableFoodsByCategory(
+			categoryId,
+			menuLevel,
+			stationLevels,
+			unlockedFoods
+		)
+		local filtered = {}
+		for _, food in ipairs(foods) do
+			local isEnabled = enabledFoods == nil or enabledFoods[food.Id] == true
+			local isUnlocked = unlockedFoods[food.Id] == true or not food.Unlock
+			if isEnabled and isUnlocked and FoodConfig.GetFoodById(food.Id) then
+				table.insert(filtered, food)
+				table.insert(allCandidates, food)
+			end
+		end
+		candidatesByCategory[categoryId] = filtered
+	end
 
 	-- 1️⃣ обычный заказ
-	local items, usedCategories = generateBaseOrder(
-		menuLevel,
-		stationLevels,
-		unlockedFoods,
-		enabledFoods
-	)
+	local items, usedCategories = generateBaseOrder(candidatesByCategory, categories)
 
 	-- 2️⃣ premium-pass
 	applyPremiumPass(items, usedCategories, context)
 
-	local maxItems = context.maxItems
-	if maxItems == 1 then
-		local firstKey
-		for key in pairs(items) do
-			firstKey = key
-			break
-		end
-
-		if firstKey then
-			items = {
-				[firstKey] = items[firstKey],
+	if next(items) == nil and #allCandidates > 0 then
+		local fallback = candidatesByCategory.Main or {}
+		local fallbackDrink = candidatesByCategory.Drink or {}
+		local fallbackDessert = candidatesByCategory.Dessert or {}
+		local chosen = fallback[1] or fallbackDrink[1] or fallbackDessert[1] or allCandidates[1]
+		if chosen then
+			items[chosen.Id] = {
+				quantity = 1,
 			}
+			if Config and Config.Server and Config.Server.DebugMode then
+				print(string.format(
+					"[OrderGenFallback] empty result -> forced=%s candidates=%d",
+					tostring(chosen.Id),
+					#allCandidates
+				))
+			end
 		end
 	end
 

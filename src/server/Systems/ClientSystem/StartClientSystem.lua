@@ -341,8 +341,41 @@ local function computePlannedOrder(state)
 	local stationLevels = PlayerService.GetStationLevels(state.player)
 	local unlockedFoods = ensureBoolMap(PlayerService.GetUnlockedFoods(state.player))
 	local enabledFoods = ensureBoolMap(PlayerService.GetEnabledFoods(state.player))
+	if next(enabledFoods) == nil then
+		enabledFoods = unlockedFoods
+	end
+	local menuLevel = 1
+
+	if Config.Server.DebugMode then
+		print(string.format(
+			"[OrderGenContext] enabledType=%s unlockedType=%s enabledCola=%s unlockedCola=%s",
+			typeof(enabledFoods),
+			typeof(unlockedFoods),
+			tostring(enabledFoods and enabledFoods["Cola"]),
+			tostring(unlockedFoods and unlockedFoods["Cola"])
+		))
+
+		local function logKeys(label, data)
+			local keys = {}
+			for key, value in pairs(data or {}) do
+				if value == true or value == 1 then
+					table.insert(keys, tostring(key))
+				end
+			end
+			table.sort(keys)
+			local shown = {}
+			for index = 1, math.min(10, #keys) do
+				shown[index] = keys[index]
+			end
+			print(string.format("[OrderGenContext] %sKeys=%s", label, table.concat(shown, ",")))
+		end
+
+		logKeys("enabled", enabledFoods)
+		logKeys("unlocked", unlockedFoods)
+	end
+
 	local items = OrderGenerator.Generate({
-		menuLevel = 1,
+		menuLevel = menuLevel,
 		stationLevels = stationLevels,
 		unlockedFoods = unlockedFoods,
 		enabledFoods = enabledFoods,

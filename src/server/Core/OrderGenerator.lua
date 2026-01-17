@@ -35,7 +35,7 @@ local function normalizeBoolMap(value)
 end
 
 -- Взвешенный выбор по OrderChance
-local function weightedPick(list)
+local function weightedPick(list, roll01)
 	if #list == 0 then
 		return nil
 	end
@@ -58,7 +58,7 @@ local function weightedPick(list)
 		return nil
 	end
 
-	local r = math.random() * totalWeight
+	local r = roll01() * totalWeight
 	for _, entry in ipairs(pool) do
 		if r <= entry.acc then
 			return entry.item
@@ -72,7 +72,7 @@ end
 -- BASE ORDER (обычное меню)
 ---------------------------------------------------------------------
 
-local function generateBaseOrder(candidatesByCategory, categories)
+local function generateBaseOrder(candidatesByCategory, categories, roll01, rollChance, randInt)
 	local items = {}
 	local usedCategories = {}
 	local picked = {}
@@ -83,7 +83,7 @@ local function generateBaseOrder(candidatesByCategory, categories)
 		end
 		picked[food.Id] = true
 		local maxPerOrder = food.MaxPerOrder or 1
-		local quantity = math.random(1, maxPerOrder)
+		local quantity = randInt(1, maxPerOrder)
 		items[food.Id] = {
 			quantity = quantity,
 		}
@@ -92,34 +92,54 @@ local function generateBaseOrder(candidatesByCategory, categories)
 
 	local mainCandidates = candidatesByCategory.Main or {}
 	if #mainCandidates > 0 then
-		local mainFood = weightedPick(mainCandidates)
+		local mainFood = weightedPick(mainCandidates, roll01)
 		if mainFood then
 			addFood(mainFood)
 			usedCategories.Main = true
 		end
 	end
 
+	local drinkCandidates = candidatesByCategory.Drink or {}
+	if #drinkCandidates > 0 then
+		local drinkChance = 0.6
+		local drinkRoll = roll01()
+		if Config.Server.DebugMode then
+			print(string.format(
+				"[OrderGenRoll] Drink roll=%.3f chance=%.2f candidates=%d",
+				drinkRoll,
+				drinkChance,
+				#drinkCandidates
+			))
+		end
+		if drinkRoll <= drinkChance then
+			local drinkFood = weightedPick(drinkCandidates, roll01)
+			if drinkFood then
+				addFood(drinkFood)
+				usedCategories.Drink = true
+			end
+		end
+	end
+
 	for categoryId, category in pairs(categories) do
+		if categoryId == "Main" or categoryId == "Drink" then
+			continue
+		end
 		local foods = candidatesByCategory[categoryId] or {}
 		if #foods == 0 then
 			continue
 		end
 
 		local categoryChance = category.OrderChance or 0
-		if categoryId == "Drink" then
-			categoryChance = math.max(categoryChance, 0.6)
-		end
-
 		local maxItems = category.MaxItems or 1
 
 		-- ролл категории
-		if math.random() <= categoryChance then
+		if rollChance(categoryChance) then
 			usedCategories[categoryId] = true
 
-			local distinctCount = math.random(1, math.min(maxItems, #foods))
+			local distinctCount = randInt(1, math.min(maxItems, #foods))
 
 			for _ = 1, distinctCount do
-				local food = weightedPick(foods)
+				local food = weightedPick(foods, roll01)
 				if food then
 					addFood(food)
 				end
@@ -134,14 +154,14 @@ end
 -- PREMIUM PASS
 ---------------------------------------------------------------------
 
-local function applyPremiumPass(items, usedCategories, context)
+local function applyPremiumPass(items, usedCategories, context, roll01, rollChance)
 	local premiumChance = context.premiumRollChance or 0
 	if premiumChance <= 0 then
 		return
 	end
 
 	-- ролл премиума
-	if math.random() > premiumChance then
+	if not rollChance(premiumChance) then
 		return
 	end
 
@@ -185,7 +205,7 @@ local function applyPremiumPass(items, usedCategories, context)
 		return
 	end
 
-	local premiumFood = weightedPick(premiumCandidates)
+	local premiumFood = weightedPick(premiumCandidates, roll01)
 	if not premiumFood then
 		return
 	end
@@ -202,6 +222,17 @@ end
 
 function OrderGenerator.Generate(context)
 	assert(type(context) == "table", "[OrderGenerator] context is required")
+
+	local rng = context.rng or Random.new()
+	local function roll01()
+		return rng:NextNumber()
+	end
+	local function rollChance(p)
+		return roll01() <= p
+	end
+	local function randInt(min, max)
+		return rng:NextInteger(min, max)
+	end
 
 	local menuLevel = context.menuLevel or 1
 	local stationLevels = context.stationLevels or {}
@@ -232,10 +263,10 @@ function OrderGenerator.Generate(context)
 	end
 
 	-- 1️⃣ обычный заказ
-	local items, usedCategories = generateBaseOrder(candidatesByCategory, categories)
+	local items, usedCategories = generateBaseOrder(candidatesByCategory, categories, roll01, rollChance, randInt)
 
 	-- 2️⃣ premium-pass
-	applyPremiumPass(items, usedCategories, context)
+	applyPremiumPass(items, usedCategories, context, roll01, rollChance)
 
 	if next(items) == nil and #allCandidates > 0 then
 		local fallback = candidatesByCategory.Main or {}
@@ -254,6 +285,30 @@ function OrderGenerator.Generate(context)
 				))
 			end
 		end
+	end
+
+	if Config.Server.DebugMode then
+		local parts = {}
+		local stations = {}
+		for foodId, entry in pairs(items) do
+			local qty = entry.quantity or entry or 1
+			table.insert(parts, string.format("%s=%s", foodId, tostring(qty)))
+			local food = FoodConfig.GetFoodById(foodId)
+			if food and food.Station then
+				stations[food.Station] = true
+			end
+		end
+		table.sort(parts)
+		local stationList = {}
+		for station in pairs(stations) do
+			table.insert(stationList, station)
+		end
+		table.sort(stationList)
+		print(string.format(
+			"[OrderGenResult] items=%s stations=%s",
+			table.concat(parts, ","),
+			table.concat(stationList, ",")
+		))
 	end
 
 	return items

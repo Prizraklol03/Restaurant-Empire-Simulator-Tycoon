@@ -28,6 +28,50 @@ local function getBusiness(save)
 	return save.Business
 end
 
+local function ensureBoolMap(value)
+	local map = {}
+	if type(value) ~= "table" then
+		return map
+	end
+	if #value > 0 then
+		for _, entry in ipairs(value) do
+			if type(entry) == "string" and entry ~= "" then
+				map[entry] = true
+			end
+		end
+		return map
+	end
+	for key, entry in pairs(value) do
+		if entry == true then
+			map[key] = true
+		elseif type(entry) == "number" and entry ~= 0 then
+			map[key] = true
+		elseif type(entry) == "string" and entry == "true" then
+			map[key] = true
+		end
+	end
+	return map
+end
+
+local function resolveFoodsMap(profile, topKey, bizKey)
+	local business = profile.Business or {}
+	local topMap = ensureBoolMap(profile[topKey])
+	local bizMap = ensureBoolMap(business[bizKey])
+
+	for key in pairs(bizMap) do
+		topMap[key] = true
+	end
+	for key in pairs(topMap) do
+		bizMap[key] = true
+	end
+
+	profile[topKey] = topMap
+	business[bizKey] = bizMap
+	profile.Business = business
+
+	return topMap
+end
+
 ----------------------------------------------------
 -- MONEY
 ----------------------------------------------------
@@ -182,17 +226,44 @@ function PlayerService.UnlockFood(player, foodId)
 end
 
 function PlayerService.GetUnlockedFoods(player)
-	local business = getBusiness(getSave(player))
-	return business.UnlockedFoods
+	local save = getSave(player)
+	local result = resolveFoodsMap(save, "unlockedFoods", "UnlockedFoods")
+	if Config.Server.DebugMode then
+		print(string.format(
+			"[PlayerFoods] unlocked sources: top=%s biz=%s",
+			tostring(save.unlockedFoods ~= nil),
+			tostring(save.Business and save.Business.UnlockedFoods ~= nil)
+		))
+		print(string.format(
+			"[PlayerFoods] unlockedCola top=%s biz=%s",
+			tostring(save.unlockedFoods and save.unlockedFoods["Cola"]),
+			tostring(save.Business and save.Business.UnlockedFoods and save.Business.UnlockedFoods["Cola"])
+		))
+	end
+	return result
 end
 
 function PlayerService.GetEnabledFoods(player)
-	local business = getBusiness(getSave(player))
-	return business.EnabledFoods
+	local save = getSave(player)
+	local result = resolveFoodsMap(save, "enabledFoods", "EnabledFoods")
+	if Config.Server.DebugMode then
+		print(string.format(
+			"[PlayerFoods] enabled sources: top=%s biz=%s",
+			tostring(save.enabledFoods ~= nil),
+			tostring(save.Business and save.Business.EnabledFoods ~= nil)
+		))
+		print(string.format(
+			"[PlayerFoods] enabledCola top=%s biz=%s",
+			tostring(save.enabledFoods and save.enabledFoods["Cola"]),
+			tostring(save.Business and save.Business.EnabledFoods and save.Business.EnabledFoods["Cola"])
+		))
+	end
+	return result
 end
 
 function PlayerService.SetFoodEnabled(player, foodId, enabled)
-	local business = getBusiness(getSave(player))
+	local save = getSave(player)
+	local business = getBusiness(save)
 	local food = FoodConfig.GetFoodById(foodId)
 	if not food then
 		return false, "unknown_food"
@@ -203,8 +274,13 @@ function PlayerService.SetFoodEnabled(player, foodId, enabled)
 			return false, "locked"
 		end
 		business.EnabledFoods[foodId] = true
+		save.enabledFoods = save.enabledFoods or {}
+		save.enabledFoods[foodId] = true
 	else
 		business.EnabledFoods[foodId] = nil
+		if type(save.enabledFoods) == "table" then
+			save.enabledFoods[foodId] = nil
+		end
 	end
 	business.EnabledInitialized = true
 

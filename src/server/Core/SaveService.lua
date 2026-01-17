@@ -32,6 +32,47 @@ local profileLoadedCallbacks = {}
 
 local DEFAULT_START_FOODS = { "Burger", "Cola" }
 
+local function normalizeFoodsMap(value)
+	local map = {}
+	if type(value) ~= "table" then
+		return map
+	end
+	if #value > 0 then
+		for _, entry in ipairs(value) do
+			if type(entry) == "string" and entry ~= "" then
+				map[entry] = true
+			end
+		end
+		return map
+	end
+	for key, entry in pairs(value) do
+		if entry == true then
+			map[key] = true
+		elseif type(entry) == "number" and entry ~= 0 then
+			map[key] = true
+		elseif type(entry) == "string" and entry == "true" then
+			map[key] = true
+		end
+	end
+	return map
+end
+
+local function syncFoodMaps(profile, topKey, bizKey)
+	profile.Business = profile.Business or {}
+	local topMap = normalizeFoodsMap(profile[topKey])
+	local bizMap = normalizeFoodsMap(profile.Business[bizKey])
+
+	for key in pairs(bizMap) do
+		topMap[key] = true
+	end
+	for key in pairs(topMap) do
+		bizMap[key] = true
+	end
+
+	profile[topKey] = topMap
+	profile.Business[bizKey] = bizMap
+end
+
 local function ensureFoodTables(profile)
 	profile.Business = profile.Business or {}
 	profile.Business.UnlockedFoods = profile.Business.UnlockedFoods or {}
@@ -137,6 +178,8 @@ local function createDefaultProfile()
 	}
 
 	ensureFoodTables(profile)
+	syncFoodMaps(profile, "unlockedFoods", "UnlockedFoods")
+	syncFoodMaps(profile, "enabledFoods", "EnabledFoods")
 	return profile
 end
 
@@ -213,6 +256,8 @@ local function applyDefaults(profile)
 	end
 
 	ensureFoodTables(profile)
+	syncFoodMaps(profile, "unlockedFoods", "UnlockedFoods")
+	syncFoodMaps(profile, "enabledFoods", "EnabledFoods")
 
 	if type(profile.unlockedFoods) == "table" then
 		local normalized = {}

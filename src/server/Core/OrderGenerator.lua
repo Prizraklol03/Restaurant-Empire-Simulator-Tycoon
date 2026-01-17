@@ -29,6 +29,10 @@ local function normalizeBoolMap(value)
 	for key, entry in pairs(value) do
 		if entry == true then
 			map[key] = true
+		elseif type(entry) == "number" and entry ~= 0 then
+			map[key] = true
+		elseif type(entry) == "string" and entry == "true" then
+			map[key] = true
 		end
 	end
 	return map
@@ -236,8 +240,26 @@ function OrderGenerator.Generate(context)
 
 	local menuLevel = context.menuLevel or 1
 	local stationLevels = context.stationLevels or {}
+	if Config.Server.DebugMode then
+		local rawEnabled = context.enabledFoods
+		local rawUnlocked = context.unlockedFoods
+		local rawEnabledCola = rawEnabled and rawEnabled["Cola"]
+		local rawUnlockedCola = rawUnlocked and rawUnlocked["Cola"]
+		print(string.format(
+			"[OrderGenDebug] raw enabled Cola=%s raw unlocked Cola=%s",
+			tostring(rawEnabledCola),
+			tostring(rawUnlockedCola)
+		))
+	end
+
 	local unlockedFoods = normalizeBoolMap(context.unlockedFoods)
 	local enabledFoods = context.enabledFoods == nil and nil or normalizeBoolMap(context.enabledFoods)
+	if enabledFoods and next(enabledFoods) == nil then
+		enabledFoods = nil
+		if Config.Server.DebugMode then
+			print("[OrderGenEnabled] enabledFoods empty -> ignoring enabled filter")
+		end
+	end
 
 	local categories = FoodConfig.GetCategories()
 	local candidatesByCategory = {}
@@ -260,6 +282,19 @@ function OrderGenerator.Generate(context)
 			end
 		end
 		candidatesByCategory[categoryId] = filtered
+	end
+
+	if Config.Server.DebugMode then
+		local mainCount = #candidatesByCategory.Main
+		local drinkCount = #candidatesByCategory.Drink
+		local dessertCount = #candidatesByCategory.Dessert
+		print(string.format(
+			"[OrderGenCandidates] Main=%d Drink=%d Dessert=%d All=%d",
+			mainCount,
+			drinkCount,
+			dessertCount,
+			#allCandidates
+		))
 	end
 
 	-- 1️⃣ обычный заказ

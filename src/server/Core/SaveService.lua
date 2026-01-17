@@ -102,6 +102,10 @@ local function getStationLevels(profile)
 end
 
 local function applyStarterFoods(profile)
+	if profile._starterFoodsApplied then
+		return
+	end
+
 	local unlockedTop = normalizeFoodsMap(profile.unlockedFoods)
 	local enabledTop = normalizeFoodsMap(profile.enabledFoods)
 	local unlockedBiz = normalizeFoodsMap(profile.Business and profile.Business.UnlockedFoods)
@@ -125,6 +129,10 @@ local function applyStarterFoods(profile)
 
 	local stationLevels = getStationLevels(profile)
 
+	local hadColaUnlocked = unlocked["Cola"] == true
+	local hadColaEnabled = enabled["Cola"] == true
+	local addedAny = false
+
 	for _, food in pairs(FoodConfig.Foods) do
 		local menuLevel = food.MenuLevel or 1
 		local requiredStation = food.RequiredStationLevel or 1
@@ -132,8 +140,14 @@ local function applyStarterFoods(profile)
 		if menuLevel <= 1
 			and requiredStation <= stationLevel
 			and (food.Unlock == nil or food.Unlock == false) then
-			unlocked[food.Id] = true
-			enabled[food.Id] = true
+			if not unlocked[food.Id] then
+				unlocked[food.Id] = true
+				addedAny = true
+			end
+			if not enabled[food.Id] then
+				enabled[food.Id] = true
+				addedAny = true
+			end
 		end
 	end
 
@@ -143,7 +157,9 @@ local function applyStarterFoods(profile)
 	profile.Business.UnlockedFoods = unlocked
 	profile.Business.EnabledFoods = enabled
 
-	if Config.Server.DebugMode and not profile._starterFoodsLogged then
+	profile._starterFoodsApplied = true
+
+	if Config.Server.DebugMode and addedAny and not profile._starterFoodsLogged then
 		profile._starterFoodsLogged = true
 		print(string.format(
 			"[StarterFoods] applied, unlockedCola=%s enabledCola=%s",
@@ -260,7 +276,6 @@ local function createDefaultProfile()
 	ensureFoodTables(profile)
 	syncFoodMaps(profile, "unlockedFoods", "UnlockedFoods")
 	syncFoodMaps(profile, "enabledFoods", "EnabledFoods")
-	applyStarterFoods(profile)
 	return profile
 end
 
@@ -339,8 +354,6 @@ local function applyDefaults(profile)
 	ensureFoodTables(profile)
 	syncFoodMaps(profile, "unlockedFoods", "UnlockedFoods")
 	syncFoodMaps(profile, "enabledFoods", "EnabledFoods")
-	applyStarterFoods(profile)
-
 	if type(profile.unlockedFoods) == "table" then
 		local normalized = {}
 		local seen = {}
@@ -422,6 +435,7 @@ function SaveService.Load(player)
 		local loaded = loadFromStore(player)
 		if loaded then
 			local migrated = migrateProfile(loaded)
+			applyStarterFoods(migrated)
 			Profiles[player] = migrated
 
 			for _, callback in ipairs(profileLoadedCallbacks) do

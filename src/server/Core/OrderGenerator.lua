@@ -238,6 +238,10 @@ function OrderGenerator.Generate(context)
 		return rng:NextInteger(min, max)
 	end
 
+	local function setQty(targetItems, foodId, qty)
+		targetItems[foodId] = { quantity = qty or 1 }
+	end
+
 	local menuLevel = context.menuLevel or 1
 	local stationLevels = context.stationLevels or {}
 	if Config.Server.DebugMode then
@@ -309,9 +313,7 @@ function OrderGenerator.Generate(context)
 		local fallbackDessert = candidatesByCategory.Dessert or {}
 		local chosen = fallback[1] or fallbackDrink[1] or fallbackDessert[1] or allCandidates[1]
 		if chosen then
-			items[chosen.Id] = {
-				quantity = 1,
-			}
+			setQty(items, chosen.Id, 1)
 			if Config and Config.Server and Config.Server.DebugMode then
 				print(string.format(
 					"[OrderGenFallback] empty result -> forced=%s candidates=%d",
@@ -337,10 +339,10 @@ function OrderGenerator.Generate(context)
 		local pickedId
 		if #fallbackCandidates > 0 then
 			pickedId = fallbackCandidates[math.random(1, #fallbackCandidates)]
-			items[pickedId] = 1
+			setQty(items, pickedId, 1)
 		else
 			pickedId = "Burger"
-			items[pickedId] = 1
+			setQty(items, pickedId, 1)
 			if Config.Server.DebugMode then
 				warn("[OrderGenFallback] no available foods; forcing Burger=1")
 			end
@@ -354,6 +356,15 @@ function OrderGenerator.Generate(context)
 				tostring(next(unlockedFoods) ~= nil),
 				tostring(menuLevel)
 			))
+		end
+	end
+
+	if Config.Server.DebugMode then
+		for _, value in pairs(items) do
+			if typeof(value) ~= "table" or value.quantity == nil then
+				warn("[OrderGen] invalid items format, expected {quantity=...}")
+				break
+			end
 		end
 	end
 

@@ -123,6 +123,31 @@ local function setStationPrompts(state, stationType, cookTime)
 	end
 end
 
+local function moveClientToEndAndDestroyAsync(state, clientModel)
+	if not clientModel then
+		return
+	end
+	local pos = getSpotPosition(state.endPoint)
+	if not pos then
+		clientModel:Destroy()
+		return
+	end
+	task.spawn(function()
+		moveToAndConfirm(clientModel, pos, 2.0, 8)
+		if clientModel and clientModel.Parent then
+			clientModel:Destroy()
+		end
+	end)
+end
+
+local function resetInteraction(state)
+	state.currentOrder = nil
+	state.currentAtRegister = nil
+	state.registerWaitStartAt = nil
+	setCashPrompt(state, "DISABLED")
+	setStationPrompts(state, nil, nil)
+end
+
 local function getClientRoot(model)
 	return model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
 end
@@ -297,16 +322,12 @@ local function removeClientFromQueue(state, clientId, reason)
 	end
 
 	print(string.format("[QueueExit] clientId=%s reason=%s", clientId, reason))
-	local pos = getSpotPosition(state.endPoint)
-	if client.model and pos then
-		client.state = "Exit"
-		client.moveToken += 1
-		moveToAndConfirm(client.model, pos, 2.0, 8)
-		client.model:Destroy()
-	end
-
+	local model = client.model
 	state.clients[clientId] = nil
 	shiftQueueForward(state)
+	if model then
+		moveClientToEndAndDestroyAsync(state, model)
+	end
 end
 
 local function removeClientAtRegister(state, reason)
@@ -316,23 +337,17 @@ local function removeClientAtRegister(state, reason)
 	end
 
 	local client = state.clients[clientId]
+	local model = client and client.model
 	if client then
 		print(string.format("[RegisterExit] clientId=%s reason=%s", clientId, reason))
-		local pos = getSpotPosition(state.endPoint)
-		if client.model and pos then
-			client.state = "Exit"
-			client.moveToken += 1
-			moveToAndConfirm(client.model, pos, 2.0, 8)
-			client.model:Destroy()
-		end
 		state.clients[clientId] = nil
 	end
 
-	state.currentAtRegister = nil
-	state.registerWaitStartAt = nil
-	setCashPrompt(state, "DISABLED")
-	setStationPrompts(state, nil, nil)
+	resetInteraction(state)
 	updateBusinessStats(state)
+	if model then
+		moveClientToEndAndDestroyAsync(state, model)
+	end
 end
 
 local function promoteToRegister(state)
@@ -460,6 +475,10 @@ local function completeOrder(state)
 		return
 	end
 
+	local clientId = state.currentAtRegister
+	local client = clientId and state.clients[clientId]
+	local model = client and client.model
+
 	OrderService.CompleteOrder(order.orderId)
 	PlayerService.AddMoney(state.player, order.price or 0)
 	state.servedCount += 1
@@ -467,26 +486,15 @@ local function completeOrder(state)
 
 	print(string.format("[Order] completed player=%s orderId=%s", state.player.UserId, order.orderId))
 
+	resetInteraction(state)
 	updateBusinessStats(state)
 
-	local clientId = state.currentAtRegister
-	local client = clientId and state.clients[clientId]
-	if client and client.model then
-		local pos = getSpotPosition(state.endPoint)
-		if pos then
-			client.state = "Exit"
-			client.moveToken += 1
-			moveToAndConfirm(client.model, pos, 2.0, 8)
-			client.model:Destroy()
-			state.clients[clientId] = nil
-		end
+	if clientId then
+		state.clients[clientId] = nil
 	end
-
-	state.currentOrder = nil
-	state.currentAtRegister = nil
-	state.registerWaitStartAt = nil
-	setCashPrompt(state, "DISABLED")
-	setStationPrompts(state, nil, nil)
+	if model then
+		moveClientToEndAndDestroyAsync(state, model)
+	end
 end
 
 local function failOrder(state, reason)
@@ -494,6 +502,10 @@ local function failOrder(state, reason)
 	if not order then
 		return
 	end
+
+	local clientId = state.currentAtRegister
+	local client = clientId and state.clients[clientId]
+	local model = client and client.model
 
 	OrderService.FailOrder(order.orderId, reason)
 	print(string.format("[Order] failed player=%s orderId=%s reason=%s", state.player.UserId, order.orderId, reason))
@@ -505,25 +517,14 @@ local function failOrder(state, reason)
 		orderId = order.orderId,
 	})
 
-	local clientId = state.currentAtRegister
-	local client = clientId and state.clients[clientId]
-	if client and client.model then
-		local pos = getSpotPosition(state.endPoint)
-		if pos then
-			client.state = "Exit"
-			client.moveToken += 1
-			moveToAndConfirm(client.model, pos, 2.0, 8)
-			client.model:Destroy()
-			state.clients[clientId] = nil
-		end
-	end
-
-	state.currentOrder = nil
-	state.currentAtRegister = nil
-	state.registerWaitStartAt = nil
-	setCashPrompt(state, "DISABLED")
-	setStationPrompts(state, nil, nil)
+	resetInteraction(state)
 	updateBusinessStats(state)
+	if clientId then
+		state.clients[clientId] = nil
+	end
+	if model then
+		moveClientToEndAndDestroyAsync(state, model)
+	end
 end
 
 local function startCooking(state, stationType)

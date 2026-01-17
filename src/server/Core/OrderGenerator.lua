@@ -322,6 +322,41 @@ function OrderGenerator.Generate(context)
 		end
 	end
 
+	if next(items) == nil then
+		local fallbackCandidates = {}
+		for _, food in pairs(FoodConfig.Foods) do
+			if food and food.Id then
+				local available = FoodConfig.IsFoodAvailable(food, menuLevel, stationLevels, unlockedFoods)
+				local enabledOk = enabledFoods == nil or enabledFoods[food.Id] == true
+				if available and enabledOk then
+					table.insert(fallbackCandidates, food.Id)
+				end
+			end
+		end
+
+		local pickedId
+		if #fallbackCandidates > 0 then
+			pickedId = fallbackCandidates[math.random(1, #fallbackCandidates)]
+			items[pickedId] = 1
+		else
+			pickedId = "Burger"
+			items[pickedId] = 1
+			if Config.Server.DebugMode then
+				warn("[OrderGenFallback] no available foods; forcing Burger=1")
+			end
+		end
+
+		if Config.Server.DebugMode then
+			print(string.format(
+				"[OrderGenFallback] picked=%s enabledFoods=%s unlockedFoods=%s menuLevel=%s",
+				tostring(pickedId),
+				tostring(enabledFoods ~= nil),
+				tostring(next(unlockedFoods) ~= nil),
+				tostring(menuLevel)
+			))
+		end
+	end
+
 	if Config.Server.DebugMode then
 		local parts = {}
 		local stations = {}
